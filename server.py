@@ -139,13 +139,23 @@ def call_gemini(cfg: dict, system: str, messages: list[dict]) -> str:
     return "".join(p.get("text", "") for p in parts).strip()
 
 
-SYSTEM_TEMPLATE = """You are the voice of a personal knowledge galaxy. Answer the user's question using ONLY the notes provided below. Answer in 2-3 sentences. If the notes do not cover the question, say plainly that the notes don't cover it — do not guess or use outside knowledge.
+SYSTEM_TEMPLATE = """You are the butler of Arnav's knowledge galaxy — his "second brain". You are a dry, impeccably polite British butler with a razor wit. Address him as "sir" occasionally (not every sentence); "sir Arnav" or simply "Arnav" where it suits the moment. One genuinely funny line beats three bland ones. Never grovel, never gush.
+
+Two kinds of requests arrive:
+
+1. Questions about the notes. Answer using ONLY the notes provided below: exactly ONE witty sentence, then the facts, briefly. NEVER recite or paraphrase the whole note back — it is already on his screen. If the notes don't cover it, admit it plainly (with dignity): do not guess or use outside knowledge.
+
+2. Small talk, greetings, or jokes. Reply in character, briefly, and begin your reply with the exact token [CHAT] — this keeps the galaxy's camera still. Use [CHAT] ONLY when the request is genuinely not about the notes.
 
 NOTES:
 {notes}"""
 
+CHAT_MARKER = "[CHAT]"
+
 
 def format_notes(notes: list[dict]) -> str:
+    if not notes:
+        return "(no notes matched this question)"
     return "\n\n".join(
         f"[{n['label']}] (topic: {n['group']})\n{n['excerpt']}" for n in notes
     )
@@ -212,13 +222,9 @@ class ViewerHandler(SimpleHTTPRequestHandler):
             })
             return
 
+        # Even with zero matches, let the butler respond in character
+        # (small talk, or a dignified admission that the notes are silent).
         top = score_notes(question, self.notes_index)
-        if not top:
-            self._send_json(200, {
-                "answer": "The notes don't cover that — no note matched your question.",
-                "nodes": [],
-            })
-            return
 
         session = get_session(sid)
         messages = session["messages"] + [{"role": "user", "content": question}]
@@ -240,11 +246,17 @@ class ViewerHandler(SimpleHTTPRequestHandler):
             self._send_json(502, {"error": "Gemini returned an unexpected response."})
             return
 
+        # [CHAT] marks small talk: keep the camera still (no source nodes).
+        small_talk = answer.startswith(CHAT_MARKER)
+        if small_talk:
+            answer = answer[len(CHAT_MARKER):].strip()
+
         session["messages"] = (
             messages + [{"role": "assistant", "content": answer}]
         )[-MAX_HISTORY_TURNS * 2:]
 
-        self._send_json(200, {"answer": answer, "nodes": [n["id"] for n in top]})
+        node_ids = [] if small_talk else [n["id"] for n in top]
+        self._send_json(200, {"answer": answer, "nodes": node_ids})
 
 
 def main() -> None:

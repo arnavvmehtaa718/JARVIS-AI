@@ -594,9 +594,20 @@ function unlockAudio() {
   const blank = new SpeechSynthesisUtterance(' ');
   blank.volume = 0;
   synth.speak(blank);
+  // audio is now allowed — deliver the boot greeting he couldn't hear on load
+  if (pendingGreeting) {
+    const g = pendingGreeting;
+    pendingGreeting = null;
+    setTimeout(() => speak(g), 150);
+  }
 }
 window.addEventListener('pointerdown', unlockAudio, { once: true });
 window.addEventListener('keydown', unlockAudio, { once: true });
+
+/* ---------- boot greeting ---------- */
+const GREETING = `Good evening, sir. ${GRAPH.nodes.length} notes indexed, all present and accounted for.`;
+let pendingGreeting = GREETING; // spoken after the first interaction unlocks audio
+showAnswer(GREETING);
 
 function speak(text) {
   if (!synth) { setVoiceStatus(null); return; }
