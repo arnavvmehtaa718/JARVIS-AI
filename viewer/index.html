@@ -196,6 +196,10 @@ const Graph = new ForceGraph3D(document.getElementById('graph'))
   .onNodeClick(node => selectNode(node))
   .onBackgroundClick(() => clearSelection());
 
+// Exposed for debugging and future features (nodes are looked up by numeric id/index)
+window.__graph = Graph;
+window.__selectNode = id => selectNode(Graph.graphData().nodes[id]);
+
 /* ---------- cinematic bloom ---------- */
 if (!reduceMotion) {
   const bloom = new UnrealBloomPass(
@@ -279,7 +283,7 @@ function selectNode(node) {
   pauseIdle();
 
   // fly the camera to the node
-  const d = 110;
+  const d = 200;
   const ratio = 1 + d / Math.hypot(node.x || 1, node.y || 1, node.z || 1);
   Graph.cameraPosition(
     { x: node.x * ratio, y: node.y * ratio, z: node.z * ratio },
