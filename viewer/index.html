@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Knowledge Galaxy</title>
+<title>JARVIS</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -203,8 +203,8 @@
 
 <header id="hud">
   <div>
-    <h1>Knowledge <em>Galaxy</em></h1>
-    <p class="sub" id="stats">Loading…</p>
+    <h1>J.A.R.V.I.S<em>.</em></h1>
+    <p class="sub" id="stats">Booting…</p>
   </div>
   <nav id="legend" aria-label="Note groups"></nav>
 </header>
@@ -216,7 +216,7 @@
   <p id="voice-status" role="status" aria-live="polite"><span class="pip">●</span> <span class="label"></span></p>
   <form id="ask-form">
     <input id="ask-input" type="text" autocomplete="off" maxlength="500"
-           placeholder="Ask your notes anything…" aria-label="Ask your notes a question" />
+           placeholder='Ask anything — or say "Jarvis…"' aria-label="Ask JARVIS a question" />
     <button id="mic" type="button" aria-label="Ask by voice" title="Ask by voice" hidden>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -525,78 +525,144 @@ function showAnswer(text, nodeIds = [], isError = false) {
   answerBox.classList.add('show');
 }
 
+/* ---------- node birth: shared by /remember and /agent ---------- */
+// NOTE: Graph was initialized with .graphData(GRAPH), so GRAPH.nodes IS the
+// live array — mutate it once, then re-set graphData. Never push copies.
+function birthNode({ node, links, anchor }) {
+  const anchorNode = anchor != null ? Graph.graphData().nodes[anchor] : null;
+  // born at its most related node's position (small offset so the force engine separates them)
+  node.x = (anchorNode?.x ?? 0) + 12;
+  node.y = (anchorNode?.y ?? 0) + 12;
+  node.z = (anchorNode?.z ?? 0) + 12;
+  node.__born = Date.now() + 2000; // pulse starts as the camera arrives
+  GRAPH.nodes.push(node);
+  GRAPH.links.push(...links.map(l => ({ ...l })));
+  neighborsOf.push(new Set());
+  links.forEach(l => {
+    neighborsOf[l.source].add(l.target);
+    neighborsOf[l.target].add(l.source);
+    rawLinkKeys.push(`${l.source}-${l.target}`);
+  });
+
+  // new group gets a color + legend entry the first time
+  if (!(node.group in groupColor)) {
+    groupColor[node.group] = PALETTE[Object.keys(groupColor).length % PALETTE.length];
+    const el = document.createElement('span');
+    el.className = 'item';
+    el.innerHTML = `<span class="dot" style="color:${groupColor[node.group]};background:${groupColor[node.group]}"></span>${node.group}`;
+    legend.appendChild(el);
+  }
+
+  Graph.graphData({ nodes: GRAPH.nodes, links: GRAPH.links });
+
+  document.getElementById('stats').textContent =
+    `${GRAPH.nodes.length} notes · ${GRAPH.links.length} connections`;
+
+  // fly to the newborn star, keep it pulsing while the size accessor re-evaluates
+  const added = Graph.graphData().nodes[node.id];
+  setTimeout(() => selectNode(added), 400); // let the force engine place it first
+  const pulseUntil = Date.now() + 2000 + PULSE_MS;
+  (function repulse() {
+    Graph.nodeVal(Graph.nodeVal());
+    if (Date.now() < pulseUntil) setTimeout(repulse, 120);
+  })();
+}
+
+/* ---------- shared POST helper for the ask bar flows ---------- */
+async function askApi(path, body, statusLabel, workingText) {
+  askButton.disabled = true;
+  stopSpeaking();
+  setVoiceStatus('thinking', statusLabel);
+  showAnswer(workingText);
+  try {
+    const res = await fetch(path, {
+      method: body ? 'POST' : 'GET',
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined
+    });
+    return { ok: res.ok, status: res.status, data: await res.json() };
+  } catch {
+    return { ok: false, status: 0, data: { error: 'Could not reach the server.' } };
+  } finally {
+    askButton.disabled = false;
+  }
+}
+
 /* ---------- remember: grow the brain live ---------- */
 const REMEMBER_RE = /^\s*remember\s+that\b/i;
 
 async function rememberNote(text) {
-  askButton.disabled = true;
-  stopSpeaking();
-  setVoiceStatus('thinking', 'filing…');
-  showAnswer('Committing that to memory…');
-  try {
-    const res = await fetch('/remember', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text })
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setVoiceStatus(null);
-      showAnswer(data.error || 'Something went wrong.', [], true);
-      return;
-    }
+  const { ok, data } = await askApi('/remember', { text }, 'filing…', 'Committing that to memory…');
+  if (!ok) { setVoiceStatus(null); showAnswer(data.error || 'Something went wrong.', [], true); return; }
+  birthNode(data);
+  showAnswer(data.answer, [data.node.id]);
+  speak(data.answer); // one witty confirmation, not the note
+  askInput.value = '';
+}
 
-    // ---- add the node to the live galaxy ----
-    // NOTE: Graph was initialized with .graphData(GRAPH), so GRAPH.nodes IS the
-    // live array — mutate it once, then re-set graphData. Never push copies.
-    const { node, links, anchor } = data;
-    const anchorNode = anchor != null ? Graph.graphData().nodes[anchor] : null;
-    // born at its most related node's position (small offset so the force engine separates them)
-    node.x = (anchorNode?.x ?? 0) + 12;
-    node.y = (anchorNode?.y ?? 0) + 12;
-    node.z = (anchorNode?.z ?? 0) + 12;
-    node.__born = Date.now() + 2000; // pulse starts as the camera arrives
-    GRAPH.nodes.push(node);
-    GRAPH.links.push(...links.map(l => ({ ...l })));
-    neighborsOf.push(new Set());
-    links.forEach(l => {
-      neighborsOf[l.source].add(l.target);
-      neighborsOf[l.target].add(l.source);
-      rawLinkKeys.push(`${l.source}-${l.target}`);
-    });
+/* ---------- briefing (weather via Open-Meteo, city stored server-side) ---------- */
+const BRIEFING_RE = /^\s*(good\s+(morning|afternoon|evening)|briefing|brief\s+me)\b/i;
+let awaitingCity = false;
 
-    // new group gets a color + legend entry the first time
-    if (!(node.group in groupColor)) {
-      groupColor[node.group] = PALETTE[Object.keys(groupColor).length % PALETTE.length];
-      const el = document.createElement('span');
-      el.className = 'item';
-      el.innerHTML = `<span class="dot" style="color:${groupColor[node.group]};background:${groupColor[node.group]}"></span>${node.group}`;
-      legend.appendChild(el);
-    }
-
-    Graph.graphData({ nodes: GRAPH.nodes, links: GRAPH.links });
-
-    document.getElementById('stats').textContent =
-      `${GRAPH.nodes.length} notes · ${GRAPH.links.length} connections`;
-
-    // fly to the newborn star, keep it pulsing while the size accessor re-evaluates
-    const added = Graph.graphData().nodes[node.id];
-    setTimeout(() => selectNode(added), 400); // let the force engine place it first
-    const pulseUntil = Date.now() + 2000 + PULSE_MS;
-    (function repulse() {
-      Graph.nodeVal(Graph.nodeVal());
-      if (Date.now() < pulseUntil) setTimeout(repulse, 120);
-    })();
-
-    showAnswer(data.answer, [node.id]);
-    speak(data.answer); // one witty confirmation, not the note
-  } catch {
-    setVoiceStatus(null);
-    showAnswer('Could not reach the server.', [], true);
-  } finally {
-    askButton.disabled = false;
-    askInput.value = '';
+async function runBriefing() {
+  const { ok, status, data } = await askApi('/briefing', null, 'briefing…', 'Preparing your briefing…');
+  if (status === 409) {
+    awaitingCity = true;
+    const askCity = 'One detail first, sir — which city shall I watch the skies over? Type it below.';
+    showAnswer(askCity);
+    speak(askCity);
+    return;
   }
+  if (!ok) { setVoiceStatus(null); showAnswer(data.error || 'Something went wrong.', [], true); return; }
+  showAnswer(data.answer);
+  speak(data.answer);
+  askInput.value = '';
+}
+
+async function setCity(city) {
+  const { ok, data } = await askApi('/settings', { city }, 'noting…', 'Consulting the atlas…');
+  if (!ok) { setVoiceStatus(null); showAnswer(data.error || 'Something went wrong.', [], true); return; }
+  awaitingCity = false;
+  askInput.value = '';
+  showAnswer(data.answer);
+  speak(data.answer);
+  setTimeout(runBriefing, 2200); // now deliver the briefing he originally asked for
+}
+
+/* ---------- time machine ---------- */
+const TIMEMACHINE_RE = /\b(what\s+(was|did)\s+i\s+(doing|do|ask|work)|time\s+machine)\b/i;
+
+async function runTimeMachine(query) {
+  const { ok, data } = await askApi('/timemachine', { query }, 'rewinding…', 'Winding back the clock…');
+  if (!ok) { setVoiceStatus(null); showAnswer(data.error || 'Something went wrong.', [], true); return; }
+  showAnswer(data.answer, data.nodes);
+  speak(data.answer);
+  if (data.nodes.length) revealSources(data.nodes);
+  askInput.value = '';
+}
+
+/* ---------- agent hands: plan → "do it" → execute ---------- */
+const AGENT_RE = /^\s*(research|repurpose|draft|write|prepare|summari[sz]e)\b/i;
+const DOIT_RE = /^\s*(do\s+it|go\s+ahead|proceed|make\s+it\s+so|confirmed?)\b[.!]?\s*$/i;
+let pendingAgentTask = false;
+
+async function agentPlan(task) {
+  const { ok, data } = await askApi('/agent', { task, session: sessionId }, 'planning…', 'Considering the task…');
+  if (!ok) { setVoiceStatus(null); showAnswer(data.error || 'Something went wrong.', [], true); return; }
+  pendingAgentTask = true;
+  showAnswer(data.answer);
+  speak(data.answer);
+  askInput.value = '';
+}
+
+async function agentExecute() {
+  pendingAgentTask = false;
+  const { ok, data } = await askApi('/agent', { confirm: true, session: sessionId }, 'working…', 'On it, sir…');
+  if (!ok) { setVoiceStatus(null); showAnswer(data.error || 'Something went wrong.', [], true); return; }
+  birthNode(data);
+  showAnswer(data.answer, [data.node.id]);
+  speak(data.spoken || data.answer); // deliverable stays on screen; speech stays short
+  askInput.value = '';
 }
 
 askForm.addEventListener('submit', async e => {
@@ -604,33 +670,23 @@ askForm.addEventListener('submit', async e => {
   const question = askInput.value.trim();
   if (!question || askButton.disabled) return;
 
+  // intent routing, most specific first
+  if (awaitingCity) { setCity(question); return; }
   if (REMEMBER_RE.test(question)) { rememberNote(question); return; }
+  if (DOIT_RE.test(question) && pendingAgentTask) { agentExecute(); return; }
+  if (AGENT_RE.test(question)) { agentPlan(question); return; }
+  if (TIMEMACHINE_RE.test(question)) { runTimeMachine(question); return; }
+  if (BRIEFING_RE.test(question)) { runBriefing(); return; }
 
-  askButton.disabled = true;
-  stopSpeaking();
-  setVoiceStatus('thinking', 'thinking…');
-  showAnswer('Consulting the galaxy…');
-  try {
-    const res = await fetch('/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, session: sessionId })
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setVoiceStatus(null);
-      showAnswer(data.error || 'Something went wrong.', [], true);
-    } else {
-      showAnswer(data.answer, data.nodes);
-      speak(data.answer); // short spoken answer only — the note itself is shown on screen
-      revealSources(data.nodes);
-    }
-  } catch {
+  const { ok, data } = await askApi('/chat', { question, session: sessionId }, 'thinking…', 'Consulting the galaxy…');
+  if (!ok) {
     setVoiceStatus(null);
-    showAnswer('Could not reach the server.', [], true);
-  } finally {
-    askButton.disabled = false;
+    showAnswer(data.error || 'Something went wrong.', [], true);
+    return;
   }
+  showAnswer(data.answer, data.nodes);
+  speak(data.answer); // short spoken answer only — the note itself is shown on screen
+  revealSources(data.nodes);
 });
 
 askInput.addEventListener('keydown', e => {
@@ -691,7 +747,8 @@ window.addEventListener('pointerdown', unlockAudio, { once: true });
 window.addEventListener('keydown', unlockAudio, { once: true });
 
 /* ---------- boot greeting ---------- */
-const GREETING = `Good evening, sir. ${GRAPH.nodes.length} notes indexed, all present and accounted for.`;
+const TOD = (h => h < 12 ? 'morning' : h < 18 ? 'afternoon' : 'evening')(new Date().getHours());
+const GREETING = `Good ${TOD}, sir. JARVIS online — ${GRAPH.nodes.length} notes indexed, all present and accounted for.`;
 let pendingGreeting = GREETING; // spoken after the first interaction unlocks audio
 showAnswer(GREETING);
 
@@ -712,57 +769,108 @@ function stopSpeaking() {
   if (synth) synth.cancel();
 }
 
-/* ---------- voice in: webkitSpeechRecognition ---------- */
+/* ---------- voice in: wake word + true barge-in ----------
+   One continuous recognizer with two modes:
+   - passive: quietly waits for "Jarvis…". Hearing it mid-speech CANCELS the
+     current utterance instantly (true barge-in). If a command follows the wake
+     word in the same breath ("Jarvis, what's on Mars?") it is submitted directly;
+     a bare "Jarvis" switches to active listening.
+   - active: live transcript into the input, submit on the final result, then
+     drop back to passive. The mic button jumps straight to active. */
 const micButton = document.getElementById('mic');
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+const WAKE_RE = /\bjarvis\b/i;
 let recognition = null;
-let listening = false;
+let recMode = 'passive';
+let recRunning = false;
+let micAllowed = true;   // flips false on not-allowed so we stop retrying
+let manualStart = false; // only surface mic errors the user caused directly
+
+function setActiveUI(on) {
+  micButton.classList.toggle('listening', on);
+  micButton.setAttribute('aria-label', on ? 'Stop listening' : 'Ask by voice');
+  if (on) setVoiceStatus('listening', 'listening…');
+  else if (voiceStatus.querySelector('.label').textContent === 'listening…') setVoiceStatus(null);
+}
+
+function enterActive() {
+  recMode = 'active';
+  stopSpeaking();
+  askInput.value = '';
+  setActiveUI(true);
+}
 
 if (SpeechRec) {
   micButton.hidden = false;
   recognition = new SpeechRec();
   recognition.lang = 'en-GB';
+  recognition.continuous = true;      // stays on: this is what makes the wake word work
   recognition.interimResults = true;
   recognition.maxAlternatives = 1;
 
-  recognition.onstart = () => {
-    listening = true;
-    micButton.classList.add('listening');
-    micButton.setAttribute('aria-label', 'Stop listening');
-    setVoiceStatus('listening', 'listening…');
-  };
+  recognition.onstart = () => { recRunning = true; };
 
   recognition.onresult = e => {
-    const transcript = [...e.results].map(r => r[0].transcript).join('');
-    askInput.value = transcript; // live transcript in the input
-    if (e.results[e.results.length - 1].isFinal && transcript.trim()) {
-      askForm.requestSubmit(); // same /chat flow as typing
+    const latest = e.results[e.results.length - 1];
+    const transcript = latest[0].transcript.trim();
+
+    if (recMode === 'passive') {
+      // true barge-in: the instant "jarvis" is heard — even mid-utterance — cut the speech
+      if (WAKE_RE.test(transcript) && synth?.speaking) stopSpeaking();
+      if (!latest.isFinal || !WAKE_RE.test(transcript)) return;
+      const command = transcript.replace(/^[\s\S]*?\bjarvis\b[,.!?\s]*/i, '').trim();
+      if (command.length > 2) {          // "Jarvis, brief me" — one breath, straight through
+        stopSpeaking();
+        askInput.value = command;
+        askForm.requestSubmit();
+      } else {
+        enterActive();                   // bare "Jarvis" — at your service, listening
+      }
+      return;
+    }
+
+    // active mode: live transcript, submit on final
+    askInput.value = transcript;
+    if (latest.isFinal && transcript) {
+      recMode = 'passive';
+      setActiveUI(false);
+      askForm.requestSubmit();
     }
   };
 
   recognition.onerror = e => {
-    setVoiceStatus(null);
     if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-      showAnswer('Microphone access was blocked. Allow it in the address bar and try again.', [], true);
-    } else if (e.error === 'no-speech') {
-      showAnswer('Heard nothing — click the mic and try again.', [], true);
-    }
+      micAllowed = false;
+      setActiveUI(false);
+      if (manualStart) showAnswer('Microphone access was blocked. Allow it in the address bar and try again.', [], true);
+    } else if (e.error === 'no-speech' && recMode === 'active') {
+      recMode = 'passive';
+      setActiveUI(false);
+    } // passive no-speech is normal silence — say nothing
+    manualStart = false;
   };
 
   recognition.onend = () => {
-    listening = false;
-    micButton.classList.remove('listening');
-    micButton.setAttribute('aria-label', 'Ask by voice');
-    if (voiceStatus.querySelector('.label').textContent === 'listening…') setVoiceStatus(null);
+    recRunning = false;
+    // the recognizer times out periodically — keep the wake word alive
+    if (micAllowed && !document.hidden) {
+      setTimeout(() => { try { recognition.start(); } catch { /* already restarting */ } }, 400);
+    }
   };
 
   micButton.addEventListener('click', () => {
     unlockAudio(); // the click also unlocks speech output
-    if (listening) { recognition.stop(); return; }
-    stopSpeaking();
-    askInput.value = '';
-    try { recognition.start(); } catch { /* already started */ }
+    manualStart = true;
+    if (recMode === 'active') { recMode = 'passive'; setActiveUI(false); return; }
+    micAllowed = true;
+    enterActive();
+    if (!recRunning) { try { recognition.start(); } catch { /* already started */ } }
   });
+
+  // begin passive wake-word listening on the first interaction (mic permission needs a gesture)
+  window.addEventListener('pointerdown', () => {
+    if (!recRunning && micAllowed) { try { recognition.start(); } catch { /* fine */ } }
+  }, { once: true });
 }
 </script>
 </body>

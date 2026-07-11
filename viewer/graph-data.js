@@ -167,6 +167,12 @@ const GRAPH = {
       "label": "The Eiffel Tower Grows About 15",
       "group": "captures",
       "excerpt": "the Eiffel Tower grows about 15 centimetres taller in summer because heat expands the iron"
+    },
+    {
+      "id": 28,
+      "label": "Research Everything My Notes Say About",
+      "group": "captures",
+      "excerpt": "Sir, I have reviewed your notes regarding water on Mars and the Moon. \n\nAccording to your records, Mars once possessed a rather wet history, with evidence from NASA's rovers"
     }
   ],
   "links": [
@@ -793,6 +799,14 @@ const GRAPH = {
     {
       "source": 26,
       "target": 27
+    },
+    {
+      "source": 16,
+      "target": 28
+    },
+    {
+      "source": 18,
+      "target": 28
     }
   ]
 };
