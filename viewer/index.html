@@ -48,7 +48,7 @@
   }
 
   #hint {
-    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    position: fixed; bottom: 84px; left: 50%; transform: translateX(-50%);
     font-size: 11px; color: var(--ink-dim); letter-spacing: 0.1em;
     text-transform: uppercase; z-index: 5; pointer-events: none;
     transition: opacity 0.6s;
@@ -105,6 +105,59 @@
   }
   #close:hover, #close:focus-visible { color: var(--ink); border-color: var(--ink-dim); }
 
+  /* ---- Ask bar ---- */
+  #ask {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    width: min(560px, calc(100vw - 32px));
+    display: flex; flex-direction: column; gap: 10px;
+    z-index: 20;
+  }
+  #answer {
+    background: var(--panel);
+    backdrop-filter: blur(14px);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 14px 16px;
+    font-size: 13px; line-height: 1.6; color: var(--ink);
+    display: none; text-wrap: pretty;
+  }
+  #answer.show { display: block; }
+  #answer.error { color: #ff9a9a; }
+  #answer .sources { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+  #answer .sources button {
+    font-family: inherit; font-size: 11px; color: var(--ink);
+    background: rgba(139, 147, 173, 0.12); border: 1px solid var(--line);
+    border-radius: 999px; padding: 3px 10px; cursor: pointer;
+    transition: background 0.2s;
+  }
+  #answer .sources button:hover,
+  #answer .sources button:focus-visible { background: rgba(139, 147, 173, 0.28); }
+  #ask form {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel);
+    backdrop-filter: blur(14px);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 6px 6px 6px 18px;
+    transition: border-color 0.2s;
+  }
+  #ask form:focus-within { border-color: rgba(139, 147, 173, 0.6); }
+  #ask input {
+    flex: 1; min-width: 0;
+    background: none; border: none; outline: none;
+    font-family: inherit; font-size: 13px; color: var(--ink);
+  }
+  #ask input::placeholder { color: var(--ink-dim); }
+  #ask button[type="submit"] {
+    font-family: inherit; font-size: 12px; letter-spacing: 0.06em;
+    color: var(--bg); background: var(--ink);
+    border: none; border-radius: 999px;
+    padding: 8px 18px; cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  #ask button[type="submit"]:hover { opacity: 0.85; }
+  #ask button[type="submit"]:disabled { opacity: 0.45; cursor: wait; }
+
   @media (prefers-reduced-motion: reduce) {
     #panel { transition: none; }
   }
@@ -123,6 +176,15 @@
 </header>
 
 <p id="hint">Drag to orbit · scroll to zoom · click a star to read</p>
+
+<div id="ask">
+  <div id="answer" role="status" aria-live="polite"></div>
+  <form id="ask-form">
+    <input id="ask-input" type="text" autocomplete="off" maxlength="500"
+           placeholder="Ask your notes anything…" aria-label="Ask your notes a question" />
+    <button type="submit">Ask</button>
+  </form>
+</div>
 
 <aside id="panel" aria-label="Note details" aria-hidden="true">
   <button id="close" aria-label="Close panel">×</button>
@@ -346,6 +408,75 @@ groups.forEach(g => {
   el.className = 'item';
   el.innerHTML = `<span class="dot" style="color:${groupColor[g]};background:${groupColor[g]}"></span>${g}`;
   legend.appendChild(el);
+});
+
+/* ---------- ask bar (POST /chat) ---------- */
+const askForm = document.getElementById('ask-form');
+const askInput = document.getElementById('ask-input');
+const askButton = askForm.querySelector('button[type="submit"]');
+const answerBox = document.getElementById('answer');
+const sessionId = crypto.randomUUID();
+
+function showAnswer(text, nodeIds = [], isError = false) {
+  answerBox.classList.toggle('error', isError);
+  answerBox.textContent = text;
+  if (nodeIds.length) {
+    const sources = document.createElement('div');
+    sources.className = 'sources';
+    nodeIds.forEach(id => {
+      const node = GRAPH.nodes[id]; // numeric id == array index
+      if (!node) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = node.label;
+      btn.style.borderColor = groupColor[node.group];
+      btn.addEventListener('click', () => selectNode(Graph.graphData().nodes[id]));
+      sources.appendChild(btn);
+    });
+    answerBox.appendChild(sources);
+  }
+  answerBox.classList.add('show');
+}
+
+askForm.addEventListener('submit', async e => {
+  e.preventDefault();
+  const question = askInput.value.trim();
+  if (!question || askButton.disabled) return;
+
+  askButton.disabled = true;
+  showAnswer('Consulting the galaxy…');
+  try {
+    const res = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, session: sessionId })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showAnswer(data.error || 'Something went wrong.', [], true);
+    } else {
+      showAnswer(data.answer, data.nodes);
+      // light up the source stars
+      if (data.nodes.length) {
+        selected = { id: -1 };
+        highlightNodes = new Set(data.nodes);
+        highlightLinks = new Set();
+        refreshStyles();
+      }
+    }
+  } catch {
+    showAnswer('Could not reach the server.', [], true);
+  } finally {
+    askButton.disabled = false;
+    askInput.focus();
+  }
+});
+
+askInput.addEventListener('keydown', e => {
+  // Enter during CJK IME composition confirms the text, it must not submit
+  if (e.key === 'Enter' && (e.isComposing || e.keyCode === 229)) e.preventDefault();
+  // Escape while typing should leave the input, not clear the galaxy selection
+  if (e.key === 'Escape') { e.stopPropagation(); askInput.blur(); }
 });
 </script>
 </body>

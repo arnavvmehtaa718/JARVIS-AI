@@ -1,0 +1,4 @@
+{
+  "api_key": "PASTE_YOUR_ANTHROPIC_API_KEY_HERE",
+  "model": "claude-opus-4-8"
+}
