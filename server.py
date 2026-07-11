@@ -89,9 +89,21 @@ def score_notes(question: str, index: list[dict]) -> list[dict]:
 
 # ---------------------------------------------------------------- config / llm
 
+def read_env_file_key(name: str) -> str:
+    """Look up a key in local .env files (root only — never inside viewer/)."""
+    for env_file in (ROOT / ".env.development.local", ROOT / ".env.local", ROOT / ".env"):
+        if not env_file.exists():
+            continue
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith(f"{name}="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
 def load_config() -> dict:
     cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
-    env_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    env_key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or read_env_file_key("ANTHROPIC_API_KEY")
     if env_key:
         cfg["api_key"] = env_key
     return cfg
