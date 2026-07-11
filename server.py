@@ -117,7 +117,12 @@ def load_config() -> dict:
     return cfg
 
 
-def call_gemini(cfg: dict, system: str, messages: list[dict]) -> str:
+# On 429 (rate limit), retry once after a pause, then fall back to the lite
+# model — it has its own separate free-tier quota.
+FALLBACK_MODELS = ["gemini-flash-lite-latest"]
+
+
+def _gemini_once(model: str, api_key: str, system: str, messages: list[dict]) -> str:
     contents = [
         {"role": "model" if m["role"] == "assistant" else "user",
          "parts": [{"text": m["content"]}]}
@@ -129,18 +134,41 @@ def call_gemini(cfg: dict, system: str, messages: list[dict]) -> str:
         "generationConfig": {"maxOutputTokens": 1024},
     }).encode("utf-8")
     req = urllib.request.Request(
-        GEMINI_URL.format(model=cfg["model"]),
+        GEMINI_URL.format(model=model),
         data=payload,
         method="POST",
         headers={
             "content-type": "application/json",
-            "x-goog-api-key": cfg["api_key"],
+            "x-goog-api-key": api_key,
         },
     )
     with urllib.request.urlopen(req, timeout=60) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     parts = data["candidates"][0]["content"].get("parts", [])
     return "".join(p.get("text", "") for p in parts).strip()
+
+
+def call_gemini(cfg: dict, system: str, messages: list[dict]) -> str:
+    models = [cfg["model"]] + [m for m in FALLBACK_MODELS if m != cfg["model"]]
+    last_err: urllib.error.HTTPError | None = None
+    for i, model in enumerate(models):
+        try:
+            return _gemini_once(model, cfg["api_key"], system, messages)
+        except urllib.error.HTTPError as err:
+            if err.code != 429:
+                raise
+            last_err = err
+            if i == 0:  # primary model: pause briefly and retry once before falling back
+                print(f"[gemini] 429 on {model}, retrying in 3s")
+                time.sleep(3)
+                try:
+                    return _gemini_once(model, cfg["api_key"], system, messages)
+                except urllib.error.HTTPError as err2:
+                    if err2.code != 429:
+                        raise
+                    last_err = err2
+            print(f"[gemini] 429 on {model}, falling back")
+    raise last_err  # every model rate-limited
 
 
 SYSTEM_TEMPLATE = """You are JARVIS, butler of Arnav's knowledge galaxy — his "second brain". You are a dry, impeccably polite British butler with a razor wit. Address him as "sir" occasionally (not every sentence); "sir Arnav" or simply "Arnav" where it suits the moment. One genuinely funny line beats three bland ones. Never grovel, never gush.
@@ -478,7 +506,10 @@ class ViewerHandler(SimpleHTTPRequestHandler):
         except urllib.error.HTTPError as err:
             detail = err.read().decode("utf-8", "replace")[:300]
             print(f"[chat] Gemini API error {err.code}: {detail}")
-            self._send_json(502, {"error": f"Gemini API error ({err.code}). Check the model name and key in config.json."})
+            if err.code == 429:
+                self._send_json(429, {"error": "My apologies, sir — the free Gemini quota is spent for the moment. Give it a minute (or a day, if the daily limit is hit) and try again."})
+            else:
+                self._send_json(502, {"error": f"Gemini API error ({err.code}). Check the model name and key in config.json."})
             return
         except (urllib.error.URLError, TimeoutError) as err:
             print(f"[chat] network error: {err}")
