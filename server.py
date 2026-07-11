@@ -6,9 +6,9 @@ Standard library only. Usage:
     python3 build.py   # generate viewer/graph-data.js first
     python3 server.py  # then open http://localhost:4700
 
-The Anthropic API key lives in config.json (project root) or the
-ANTHROPIC_API_KEY environment variable. config.json is NOT inside viewer/,
-so it can never be served to the browser.
+The Gemini API key lives in config.json (project root) or a GEMINI_API_KEY /
+ANTHROPIC_API_KEY environment variable / root .env file. config.json and the
+.env files are NOT inside viewer/, so they can never be served to the browser.
 """
 
 import json
@@ -27,8 +27,7 @@ ROOT = Path(__file__).parent
 VIEWER_DIR = ROOT / "viewer"
 CONFIG_PATH = ROOT / "config.json"
 
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_VERSION = "2023-06-01"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 TOP_K = 6
 MAX_HISTORY_TURNS = 6          # user+assistant pairs kept per session
 SESSION_TTL_SECONDS = 60 * 60  # drop sessions idle for an hour
@@ -101,34 +100,43 @@ def read_env_file_key(name: str) -> str:
     return ""
 
 
+KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "api_key")
+
+
 def load_config() -> dict:
     cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
-    env_key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or read_env_file_key("ANTHROPIC_API_KEY")
-    if env_key:
-        cfg["api_key"] = env_key
+    for name in KEY_NAMES:
+        env_key = os.environ.get(name, "").strip() or read_env_file_key(name)
+        if env_key:
+            cfg["api_key"] = env_key
+            break
     return cfg
 
 
-def call_anthropic(cfg: dict, system: str, messages: list[dict]) -> str:
+def call_gemini(cfg: dict, system: str, messages: list[dict]) -> str:
+    contents = [
+        {"role": "model" if m["role"] == "assistant" else "user",
+         "parts": [{"text": m["content"]}]}
+        for m in messages
+    ]
     payload = json.dumps({
-        "model": cfg["model"],
-        "max_tokens": 300,
-        "system": system,
-        "messages": messages,
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": contents,
+        "generationConfig": {"maxOutputTokens": 1024},
     }).encode("utf-8")
     req = urllib.request.Request(
-        ANTHROPIC_URL,
+        GEMINI_URL.format(model=cfg["model"]),
         data=payload,
         method="POST",
         headers={
             "content-type": "application/json",
-            "x-api-key": cfg["api_key"],
-            "anthropic-version": ANTHROPIC_VERSION,
+            "x-goog-api-key": cfg["api_key"],
         },
     )
     with urllib.request.urlopen(req, timeout=60) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    return "".join(block.get("text", "") for block in data.get("content", [])).strip()
+    parts = data["candidates"][0]["content"].get("parts", [])
+    return "".join(p.get("text", "") for p in parts).strip()
 
 
 SYSTEM_TEMPLATE = """You are the voice of a personal knowledge galaxy. Answer the user's question using ONLY the notes provided below. Answer in 2-3 sentences. If the notes do not cover the question, say plainly that the notes don't cover it — do not guess or use outside knowledge.
@@ -200,7 +208,7 @@ class ViewerHandler(SimpleHTTPRequestHandler):
         key = cfg.get("api_key", "")
         if not key or "PASTE_YOUR" in key:
             self._send_json(503, {
-                "error": "No API key configured. Add it to config.json or set ANTHROPIC_API_KEY."
+                "error": "No API key configured. Add it to config.json or set GEMINI_API_KEY."
             })
             return
 
@@ -217,15 +225,19 @@ class ViewerHandler(SimpleHTTPRequestHandler):
         system = SYSTEM_TEMPLATE.format(notes=format_notes(top))
 
         try:
-            answer = call_anthropic(cfg, system, messages)
+            answer = call_gemini(cfg, system, messages)
         except urllib.error.HTTPError as err:
             detail = err.read().decode("utf-8", "replace")[:300]
-            print(f"[chat] Anthropic API error {err.code}: {detail}")
-            self._send_json(502, {"error": f"Anthropic API error ({err.code}). Check the model name and key in config.json."})
+            print(f"[chat] Gemini API error {err.code}: {detail}")
+            self._send_json(502, {"error": f"Gemini API error ({err.code}). Check the model name and key in config.json."})
             return
         except (urllib.error.URLError, TimeoutError) as err:
             print(f"[chat] network error: {err}")
-            self._send_json(502, {"error": "Could not reach the Anthropic API."})
+            self._send_json(502, {"error": "Could not reach the Gemini API."})
+            return
+        except (KeyError, IndexError) as err:
+            print(f"[chat] unexpected Gemini response shape: {err}")
+            self._send_json(502, {"error": "Gemini returned an unexpected response."})
             return
 
         session["messages"] = (
