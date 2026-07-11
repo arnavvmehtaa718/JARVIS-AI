@@ -852,11 +852,33 @@ if (SpeechRec) {
 
   recognition.onend = () => {
     recRunning = false;
-    // the recognizer times out periodically — keep the wake word alive
+    // an active session that ended without a final result must not leave the UI stuck
+    if (recMode === 'active') { recMode = 'passive'; setActiveUI(false); }
+    // quick restart for the common timeout case; the watchdog below catches the rest
     if (micAllowed && !document.hidden) {
-      setTimeout(() => { try { recognition.start(); } catch { /* already restarting */ } }, 400);
+      setTimeout(() => { try { recognition.start(); } catch { /* watchdog will retry */ } }, 300);
     }
   };
+
+  // Watchdog: Chrome kills continuous recognition after silence, tab switches,
+  // audio output, or network blips — and a single failed .start() used to end
+  // the wake word forever. Re-check every 3s and revive whenever it's down.
+  let watchdogStarted = false;
+  function startWatchdog() {
+    if (watchdogStarted) return;
+    watchdogStarted = true;
+    setInterval(() => {
+      if (!recRunning && micAllowed && !document.hidden) {
+        try { recognition.start(); } catch { /* still stopping — next tick */ }
+      }
+    }, 3000);
+    // returning to the tab restarts listening immediately, not on the next tick
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && !recRunning && micAllowed) {
+        try { recognition.start(); } catch { /* next tick */ }
+      }
+    });
+  }
 
   micButton.addEventListener('click', () => {
     unlockAudio(); // the click also unlocks speech output
@@ -864,11 +886,13 @@ if (SpeechRec) {
     if (recMode === 'active') { recMode = 'passive'; setActiveUI(false); return; }
     micAllowed = true;
     enterActive();
+    startWatchdog();
     if (!recRunning) { try { recognition.start(); } catch { /* already started */ } }
   });
 
   // begin passive wake-word listening on the first interaction (mic permission needs a gesture)
   window.addEventListener('pointerdown', () => {
+    startWatchdog();
     if (!recRunning && micAllowed) { try { recognition.start(); } catch { /* fine */ } }
   }, { once: true });
 }
