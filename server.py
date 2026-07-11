@@ -161,6 +161,80 @@ def format_notes(notes: list[dict]) -> str:
     )
 
 
+# ---------------------------------------------------------------- remember
+
+NOTES_DIR = ROOT / "notes"
+CAPTURES_DIR = NOTES_DIR / "captures"
+GRAPH_DATA = VIEWER_DIR / "graph-data.js"
+REMEMBER_RE = re.compile(r"^\s*remember\s+that\s*[,:]?\s*", re.IGNORECASE)
+TITLE_WORDS = 6
+
+WITTY_FALLBACK = "Filed and catalogued, sir — the galaxy grows by one star."
+
+WITTY_SYSTEM = (
+    "You are the dry, impeccably polite British butler of Arnav's knowledge galaxy. "
+    "He has just dictated a new note, which you have filed. Confirm it in EXACTLY ONE "
+    "short witty sentence. Address him as 'sir' if it suits. No preamble, no quotes."
+)
+
+
+def title_from_text(text: str) -> str:
+    """A sensible title from the first few words, safe as a filename."""
+    words = re.findall(r"[A-Za-z0-9']+", text)[:TITLE_WORDS]
+    title = " ".join(words).strip() or "Untitled Capture"
+    # Title-case but keep short connectives lowered mid-title
+    small = {"a", "an", "the", "of", "in", "on", "at", "to", "and", "or", "is", "are"}
+    parts = [w if (w.lower() in small and i > 0) else w.capitalize()
+             for i, w in enumerate(title.split())]
+    return " ".join(parts)[:80]
+
+
+def load_graph() -> dict:
+    raw = GRAPH_DATA.read_text(encoding="utf-8")
+    start, end = raw.index("{"), raw.rindex("}") + 1
+    return json.loads(raw[start:end])
+
+
+def save_graph(graph: dict) -> None:
+    GRAPH_DATA.write_text(
+        "const GRAPH = " + json.dumps(graph, ensure_ascii=False, indent=2) + ";\n",
+        encoding="utf-8",
+    )
+
+
+def remember_note(text: str, index: list[dict]) -> dict:
+    """Write the note to notes/captures/, append it to graph-data.js with a
+    STABLE id (= current node count — never re-sort, ids are array positions),
+    and return the new node plus its links and anchor."""
+    title = title_from_text(text)
+    CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
+    path = CAPTURES_DIR / f"{title}.md"
+    if path.exists():  # same opening words twice — keep both
+        path = CAPTURES_DIR / f"{title} ({time.strftime('%Y-%m-%d %H%M%S')}).md"
+    path.write_text(f"# {title}\n\n{text}\n", encoding="utf-8")
+
+    graph = load_graph()
+    new_id = len(graph["nodes"])
+    node = {"id": new_id, "label": path.stem, "group": "captures", "excerpt": text[:700]}
+
+    # Link where one mentions the other's title; anchor = best keyword match.
+    text_l = text.lower()
+    links = [
+        {"source": n["id"], "target": new_id}
+        for n in graph["nodes"]
+        if n["label"].lower() in text_l or title.lower() in n["excerpt"].lower()
+    ]
+    ranked = score_notes(text, index)
+    anchor = ranked[0]["id"] if ranked else (links[0]["source"] if links else None)
+    if not links and anchor is not None:
+        links = [{"source": anchor, "target": new_id}]  # never leave a star orphaned
+
+    graph["nodes"].append(node)
+    graph["links"].extend(links)
+    save_graph(graph)
+    return {"node": node, "links": links, "anchor": anchor}
+
+
 # ---------------------------------------------------------------- sessions
 
 SESSIONS: dict[str, dict] = {}  # sid -> {"messages": [...], "touched": ts}
@@ -198,6 +272,9 @@ class ViewerHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
+        if self.path == "/remember":
+            self._handle_remember()
+            return
         if self.path != "/chat":
             self._send_json(404, {"error": "Not found."})
             return
@@ -257,6 +334,45 @@ class ViewerHandler(SimpleHTTPRequestHandler):
 
         node_ids = [] if small_talk else [n["id"] for n in top]
         self._send_json(200, {"answer": answer, "nodes": node_ids})
+
+    def _handle_remember(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(length) or b"{}")
+            text = REMEMBER_RE.sub("", str(req.get("text", ""))).strip()[:2000]
+        except (ValueError, json.JSONDecodeError):
+            self._send_json(400, {"error": "Invalid request body."})
+            return
+
+        if not text:
+            self._send_json(400, {"error": "There was nothing to remember, sir."})
+            return
+
+        try:
+            result = remember_note(text, self.__class__.notes_index)
+        except OSError as err:
+            print(f"[remember] write failed: {err}")
+            self._send_json(500, {"error": "Could not write the note to disk."})
+            return
+
+        # the new note is immediately queryable via /chat
+        self.__class__.notes_index = build_index(load_notes())
+
+        # one witty confirmation line — canned fallback if the model is unavailable
+        line = WITTY_FALLBACK
+        cfg = load_config()
+        if cfg.get("api_key") and "PASTE_YOUR" not in cfg["api_key"]:
+            try:
+                line = call_gemini(
+                    cfg, WITTY_SYSTEM,
+                    [{"role": "user", "content": f'The new note reads: "{text[:300]}"'}],
+                ) or WITTY_FALLBACK
+            except Exception as err:  # noqa: BLE001 — wit is optional, filing is not
+                print(f"[remember] witty line failed, using fallback: {err}")
+
+        result["answer"] = line
+        print(f"[remember] filed '{result['node']['label']}' as node {result['node']['id']}")
+        self._send_json(200, result)
 
 
 def main() -> None:

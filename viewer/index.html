@@ -278,12 +278,22 @@ let highlightLinks = new Set(); // "s-t" keys
 /* ---------- graph ---------- */
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+/* Newly remembered nodes glow-pulse for a moment after birth */
+const PULSE_MS = 2600;
+function birthPulse(n) {
+  if (!n.__born) return 1;
+  const age = Date.now() - n.__born;
+  if (age > PULSE_MS) { delete n.__born; return 1; }
+  // three swells, decaying
+  return 1 + 1.8 * Math.abs(Math.sin(age / PULSE_MS * Math.PI * 3)) * (1 - age / PULSE_MS);
+}
+
 const Graph = new ForceGraph3D(document.getElementById('graph'))
   .graphData(GRAPH)
   .backgroundColor('#01020a')
   .showNavInfo(false)
   .nodeLabel(n => `<span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#e8ecf8;background:rgba(6,9,24,.85);padding:3px 8px;border-radius:4px;">${n.label}</span>`)
-  .nodeVal(n => 2.5 + neighborsOf[n.id].size * 0.55)
+  .nodeVal(n => (2.5 + neighborsOf[n.id].size * 0.55) * birthPulse(n))
   .nodeColor(n => {
     if (!selected) return groupColor[n.group];
     return highlightNodes.has(n.id) ? groupColor[n.group] : 'rgba(90,98,125,0.18)';
@@ -515,10 +525,86 @@ function showAnswer(text, nodeIds = [], isError = false) {
   answerBox.classList.add('show');
 }
 
+/* ---------- remember: grow the brain live ---------- */
+const REMEMBER_RE = /^\s*remember\s+that\b/i;
+
+async function rememberNote(text) {
+  askButton.disabled = true;
+  stopSpeaking();
+  setVoiceStatus('thinking', 'filing…');
+  showAnswer('Committing that to memory…');
+  try {
+    const res = await fetch('/remember', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setVoiceStatus(null);
+      showAnswer(data.error || 'Something went wrong.', [], true);
+      return;
+    }
+
+    // ---- add the node to the live galaxy ----
+    // NOTE: Graph was initialized with .graphData(GRAPH), so GRAPH.nodes IS the
+    // live array — mutate it once, then re-set graphData. Never push copies.
+    const { node, links, anchor } = data;
+    const anchorNode = anchor != null ? Graph.graphData().nodes[anchor] : null;
+    // born at its most related node's position (small offset so the force engine separates them)
+    node.x = (anchorNode?.x ?? 0) + 12;
+    node.y = (anchorNode?.y ?? 0) + 12;
+    node.z = (anchorNode?.z ?? 0) + 12;
+    node.__born = Date.now() + 2000; // pulse starts as the camera arrives
+    GRAPH.nodes.push(node);
+    GRAPH.links.push(...links.map(l => ({ ...l })));
+    neighborsOf.push(new Set());
+    links.forEach(l => {
+      neighborsOf[l.source].add(l.target);
+      neighborsOf[l.target].add(l.source);
+      rawLinkKeys.push(`${l.source}-${l.target}`);
+    });
+
+    // new group gets a color + legend entry the first time
+    if (!(node.group in groupColor)) {
+      groupColor[node.group] = PALETTE[Object.keys(groupColor).length % PALETTE.length];
+      const el = document.createElement('span');
+      el.className = 'item';
+      el.innerHTML = `<span class="dot" style="color:${groupColor[node.group]};background:${groupColor[node.group]}"></span>${node.group}`;
+      legend.appendChild(el);
+    }
+
+    Graph.graphData({ nodes: GRAPH.nodes, links: GRAPH.links });
+
+    document.getElementById('stats').textContent =
+      `${GRAPH.nodes.length} notes · ${GRAPH.links.length} connections`;
+
+    // fly to the newborn star, keep it pulsing while the size accessor re-evaluates
+    const added = Graph.graphData().nodes[node.id];
+    setTimeout(() => selectNode(added), 400); // let the force engine place it first
+    const pulseUntil = Date.now() + 2000 + PULSE_MS;
+    (function repulse() {
+      Graph.nodeVal(Graph.nodeVal());
+      if (Date.now() < pulseUntil) setTimeout(repulse, 120);
+    })();
+
+    showAnswer(data.answer, [node.id]);
+    speak(data.answer); // one witty confirmation, not the note
+  } catch {
+    setVoiceStatus(null);
+    showAnswer('Could not reach the server.', [], true);
+  } finally {
+    askButton.disabled = false;
+    askInput.value = '';
+  }
+}
+
 askForm.addEventListener('submit', async e => {
   e.preventDefault();
   const question = askInput.value.trim();
   if (!question || askButton.disabled) return;
+
+  if (REMEMBER_RE.test(question)) { rememberNote(question); return; }
 
   askButton.disabled = true;
   stopSpeaking();
