@@ -158,6 +158,40 @@
   #ask button[type="submit"]:hover { opacity: 0.85; }
   #ask button[type="submit"]:disabled { opacity: 0.45; cursor: wait; }
 
+  /* ---- Voice ---- */
+  #mic {
+    flex: none; width: 34px; height: 34px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: rgba(139, 147, 173, 0.12);
+    border: 1px solid var(--line); border-radius: 999px;
+    color: var(--ink-dim); cursor: pointer;
+    transition: color 0.2s, border-color 0.2s, background 0.2s;
+  }
+  #mic:hover, #mic:focus-visible { color: var(--ink); border-color: var(--ink-dim); }
+  #mic.listening {
+    color: #ff6b6b; border-color: #ff6b6b;
+    background: rgba(255, 107, 107, 0.12);
+    animation: mic-pulse 1.4s ease-in-out infinite;
+  }
+  #mic[hidden] { display: none; }
+  #mic svg { width: 16px; height: 16px; }
+  @keyframes mic-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255, 107, 107, 0.35); }
+    50% { box-shadow: 0 0 0 7px rgba(255, 107, 107, 0); }
+  }
+  #voice-status {
+    display: none; align-self: center;
+    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  #voice-status.show { display: block; }
+  #voice-status .pip { color: #ff6b6b; }
+  #voice-status.thinking .pip { color: #f0b35c; }
+  #voice-status.speaking .pip { color: #3fd68c; }
+  @media (prefers-reduced-motion: reduce) {
+    #mic.listening { animation: none; }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     #panel { transition: none; }
   }
@@ -179,9 +213,18 @@
 
 <div id="ask">
   <div id="answer" role="status" aria-live="polite"></div>
+  <p id="voice-status" role="status" aria-live="polite"><span class="pip">●</span> <span class="label"></span></p>
   <form id="ask-form">
     <input id="ask-input" type="text" autocomplete="off" maxlength="500"
            placeholder="Ask your notes anything…" aria-label="Ask your notes a question" />
+    <button id="mic" type="button" aria-label="Ask by voice" title="Ask by voice" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+        <line x1="12" y1="19" x2="12" y2="22"/>
+      </svg>
+    </button>
     <button type="submit">Ask</button>
   </form>
 </div>
@@ -444,6 +487,8 @@ askForm.addEventListener('submit', async e => {
   if (!question || askButton.disabled) return;
 
   askButton.disabled = true;
+  stopSpeaking();
+  setVoiceStatus('thinking', 'thinking…');
   showAnswer('Consulting the galaxy…');
   try {
     const res = await fetch('/chat', {
@@ -453,9 +498,11 @@ askForm.addEventListener('submit', async e => {
     });
     const data = await res.json();
     if (!res.ok) {
+      setVoiceStatus(null);
       showAnswer(data.error || 'Something went wrong.', [], true);
     } else {
       showAnswer(data.answer, data.nodes);
+      speak(data.answer);
       // light up the source stars
       if (data.nodes.length) {
         selected = { id: -1 };
@@ -465,10 +512,10 @@ askForm.addEventListener('submit', async e => {
       }
     }
   } catch {
+    setVoiceStatus(null);
     showAnswer('Could not reach the server.', [], true);
   } finally {
     askButton.disabled = false;
-    askInput.focus();
   }
 });
 
@@ -478,6 +525,120 @@ askInput.addEventListener('keydown', e => {
   // Escape while typing should leave the input, not clear the galaxy selection
   if (e.key === 'Escape') { e.stopPropagation(); askInput.blur(); }
 });
+
+/* ---------- voice: status line ---------- */
+const voiceStatus = document.getElementById('voice-status');
+
+function setVoiceStatus(mode, label) {
+  if (!mode) {
+    voiceStatus.classList.remove('show', 'thinking', 'speaking');
+    return;
+  }
+  voiceStatus.classList.remove('thinking', 'speaking');
+  if (mode !== 'listening') voiceStatus.classList.add(mode);
+  voiceStatus.querySelector('.label').textContent = label;
+  voiceStatus.classList.add('show');
+}
+
+/* ---------- voice out: speechSynthesis, prefer British English ---------- */
+const synth = window.speechSynthesis;
+let britishVoice = null;
+let audioUnlocked = false;
+
+function pickVoice() {
+  if (!synth) return;
+  const voices = synth.getVoices();
+  if (!voices.length) return;
+  britishVoice =
+    voices.find(v => v.lang === 'en-GB' && /google/i.test(v.name)) ||
+    voices.find(v => v.lang === 'en-GB') ||
+    voices.find(v => v.lang.startsWith('en')) ||
+    null;
+}
+pickVoice();
+if (synth) synth.addEventListener('voiceschanged', pickVoice);
+
+// Browsers block audio until a user gesture. On the first interaction, run a
+// silent utterance so later speech starts reliably.
+function unlockAudio() {
+  if (audioUnlocked || !synth) return;
+  audioUnlocked = true;
+  const blank = new SpeechSynthesisUtterance(' ');
+  blank.volume = 0;
+  synth.speak(blank);
+}
+window.addEventListener('pointerdown', unlockAudio, { once: true });
+window.addEventListener('keydown', unlockAudio, { once: true });
+
+function speak(text) {
+  if (!synth) { setVoiceStatus(null); return; }
+  synth.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  if (britishVoice) u.voice = britishVoice;
+  u.lang = britishVoice ? britishVoice.lang : 'en-GB';
+  u.rate = 1.02;
+  u.onstart = () => setVoiceStatus('speaking', 'speaking…');
+  u.onend = () => setVoiceStatus(null);
+  u.onerror = () => setVoiceStatus(null);
+  synth.speak(u);
+}
+
+function stopSpeaking() {
+  if (synth) synth.cancel();
+}
+
+/* ---------- voice in: webkitSpeechRecognition ---------- */
+const micButton = document.getElementById('mic');
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+let listening = false;
+
+if (SpeechRec) {
+  micButton.hidden = false;
+  recognition = new SpeechRec();
+  recognition.lang = 'en-GB';
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+
+  recognition.onstart = () => {
+    listening = true;
+    micButton.classList.add('listening');
+    micButton.setAttribute('aria-label', 'Stop listening');
+    setVoiceStatus('listening', 'listening…');
+  };
+
+  recognition.onresult = e => {
+    const transcript = [...e.results].map(r => r[0].transcript).join('');
+    askInput.value = transcript; // live transcript in the input
+    if (e.results[e.results.length - 1].isFinal && transcript.trim()) {
+      askForm.requestSubmit(); // same /chat flow as typing
+    }
+  };
+
+  recognition.onerror = e => {
+    setVoiceStatus(null);
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      showAnswer('Microphone access was blocked. Allow it in the address bar and try again.', [], true);
+    } else if (e.error === 'no-speech') {
+      showAnswer('Heard nothing — click the mic and try again.', [], true);
+    }
+  };
+
+  recognition.onend = () => {
+    listening = false;
+    micButton.classList.remove('listening');
+    micButton.setAttribute('aria-label', 'Ask by voice');
+    if (voiceStatus.querySelector('.label').textContent === 'listening…') setVoiceStatus(null);
+  };
+
+  micButton.addEventListener('click', () => {
+    unlockAudio(); // the click also unlocks speech output
+    if (listening) { recognition.stop(); return; }
+    stopSpeaking();
+    askInput.value = '';
+    try { recognition.start(); } catch { /* already started */ }
+  });
+}
 </script>
 </body>
 </html>
