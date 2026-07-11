@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: jarvis-ai
+    runtime: python
+    plan: free
+    buildCommand: python3 build.py
+    startCommand: python3 server.py
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false # paste your Gemini key in the Render dashboard when prompted

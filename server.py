@@ -24,7 +24,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-PORT = 4700
+PORT = int(os.environ.get("PORT", 4700))  # Render/most hosts inject PORT
 ROOT = Path(__file__).parent
 VIEWER_DIR = ROOT / "viewer"
 CONFIG_PATH = ROOT / "config.json"

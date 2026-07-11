@@ -31,6 +31,17 @@ python3 server.py
 
 Put your own notes in `notes/` (any folder structure — folders become groups) and re-run `build.py`.
 
+## Deploy (Render, free)
+
+This repo includes a `render.yaml` blueprint — one service runs everything (the Python server serves both the API and the viewer).
+
+1. Go to [dashboard.render.com](https://dashboard.render.com) → **New** → **Blueprint**.
+2. Connect this GitHub repo (`JARVIS-AI`). Render reads `render.yaml` automatically.
+3. When prompted, paste your `GEMINI_API_KEY`.
+4. Deploy. Your JARVIS is live at `https://jarvis-ai-<something>.onrender.com`.
+
+Notes on the free tier: the service sleeps after ~15 minutes idle (first request of the day takes ~50s to wake), and the disk is ephemeral — "remember that…" captures and the Time Machine log reset on redeploys. The 25 built-in notes always survive, since they're baked in at build time.
+
 ## Architecture
 
 ```
