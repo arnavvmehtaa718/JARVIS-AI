@@ -460,6 +460,40 @@ const askButton = askForm.querySelector('button[type="submit"]');
 const answerBox = document.getElementById('answer');
 const sessionId = crypto.randomUUID();
 
+/* Prove where the answer came from.
+   1-3 sources: fly to the top source, light it + its neighbors, open its panel.
+   4+ sources: the answer drew on a cluster — light the whole cluster instead of flying. */
+function revealSources(nodeIds) {
+  if (!nodeIds.length) return;
+  const liveNodes = Graph.graphData().nodes;
+
+  if (nodeIds.length < 4) {
+    // selectNode flies the camera, highlights neighbors, and opens the panel
+    selectNode(liveNodes[nodeIds[0]]);
+    // keep the remaining source stars lit alongside the top source's neighborhood
+    nodeIds.slice(1).forEach(id => highlightNodes.add(id));
+    refreshStyles();
+    return;
+  }
+
+  // cluster mode: no flight, no panel — light every source and the links between them
+  panel.classList.remove('open');
+  panel.setAttribute('aria-hidden', 'true');
+  const cluster = new Set(nodeIds);
+  selected = { id: -1 }; // sentinel: dims everything outside the highlight sets
+  highlightNodes = cluster;
+  highlightLinks = new Set(
+    rawLinkKeys.filter(k => {
+      const [s, t] = k.split('-').map(Number);
+      return cluster.has(s) && cluster.has(t);
+    })
+  );
+  refreshStyles();
+  pauseIdle();
+}
+
+window.__revealSources = revealSources; // debugging handle, like __selectNode
+
 function showAnswer(text, nodeIds = [], isError = false) {
   answerBox.classList.toggle('error', isError);
   answerBox.textContent = text;
@@ -502,14 +536,8 @@ askForm.addEventListener('submit', async e => {
       showAnswer(data.error || 'Something went wrong.', [], true);
     } else {
       showAnswer(data.answer, data.nodes);
-      speak(data.answer);
-      // light up the source stars
-      if (data.nodes.length) {
-        selected = { id: -1 };
-        highlightNodes = new Set(data.nodes);
-        highlightLinks = new Set();
-        refreshStyles();
-      }
+      speak(data.answer); // short spoken answer only — the note itself is shown on screen
+      revealSources(data.nodes);
     }
   } catch {
     setVoiceStatus(null);
