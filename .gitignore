@@ -9,6 +9,10 @@ __v0_jsx-dev-runtime.ts
 # Environment variables
 .env*.local
 
+# JARVIS personal data — never commit
+jarvis-log.jsonl
+settings.json
+
 # Common ignores
 node_modules
 .next/

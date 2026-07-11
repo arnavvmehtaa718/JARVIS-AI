@@ -173,6 +173,12 @@ const GRAPH = {
       "label": "Research Everything My Notes Say About",
       "group": "captures",
       "excerpt": "Sir, I have reviewed your notes regarding water on Mars and the Moon. \n\nAccording to your records, Mars once possessed a rather wet history, with evidence from NASA's rovers"
+    },
+    {
+      "id": 29,
+      "label": "Bananas are Berries But Strawberries are",
+      "group": "captures",
+      "excerpt": "bananas are berries but strawberries are not"
     }
   ],
   "links": [
