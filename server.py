@@ -120,23 +120,33 @@ def load_config() -> dict:
 # ---------------------------------------------------------------- elevenlabs tts
 # The key stays strictly server-side: the browser POSTs text to /tts and gets
 # audio bytes back — it never sees the key. No key → 503 → browser voice fallback.
+# Both the key and the voice come from env vars (ELEVENLABS_API_KEY,
+# ELEVENLABS_VOICE_ID) so the voice can be swapped without touching code.
 
-ELEVEN_VOICE_ID = "lUTamkMw7gOzZbFIwmq4"
 ELEVEN_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=mp3_44100_64"
 
 
+def load_env_setting(name: str) -> str:
+    """Env var first, then local .env files — read fresh each call."""
+    return os.environ.get(name, "").strip() or read_env_file_key(name)
+
+
 def load_eleven_key() -> str:
-    return os.environ.get("ELEVENLABS_API_KEY", "").strip() or read_env_file_key("ELEVENLABS_API_KEY")
+    return load_env_setting("ELEVENLABS_API_KEY")
 
 
-def eleven_tts(text: str, api_key: str) -> bytes:
+def load_eleven_voice() -> str:
+    return load_env_setting("ELEVENLABS_VOICE_ID")
+
+
+def eleven_tts(text: str, api_key: str, voice_id: str) -> bytes:
     payload = json.dumps({
         "text": text,
         "model_id": "eleven_turbo_v2_5",  # lowest-latency model
         "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
     }).encode("utf-8")
     req = urllib.request.Request(
-        ELEVEN_TTS_URL.format(voice=ELEVEN_VOICE_ID),
+        ELEVEN_TTS_URL.format(voice=voice_id),
         data=payload,
         method="POST",
         headers={"content-type": "application/json", "xi-api-key": api_key},
@@ -621,11 +631,13 @@ class ViewerHandler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "Text required."})
             return
         api_key = load_eleven_key()
-        if not api_key:
-            self._send_json(503, {"error": "no_tts_key"})  # client falls back to browser voice
+        voice_id = load_eleven_voice()
+        if not api_key or not voice_id:
+            # missing key or voice → client falls back to browser voice
+            self._send_json(503, {"error": "no_tts_key"})
             return
         try:
-            audio = eleven_tts(text, api_key)
+            audio = eleven_tts(text, api_key, voice_id)
         except urllib.error.HTTPError as err:
             print(f"[tts] ElevenLabs error {err.code}: {err.read().decode('utf-8', 'replace')[:200]}")
             self._send_json(502, {"error": "tts_failed"})
