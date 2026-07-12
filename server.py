@@ -117,12 +117,14 @@ def load_config() -> dict:
     return cfg
 
 
-# On 429 (rate limit), retry once after a pause, then fall back to the lite
-# model — it has its own separate free-tier quota.
-FALLBACK_MODELS = ["gemini-flash-lite-latest"]
+# On 429 (rate limit), retry once after a pause, then fall back to the full
+# flash model — it has its own separate free-tier quota. (Lite is primary:
+# it answers in under a second where flash takes ~9s.)
+FALLBACK_MODELS = ["gemini-flash-latest"]
 
 
-def _gemini_once(model: str, api_key: str, system: str, messages: list[dict]) -> str:
+def _gemini_once(model: str, api_key: str, system: str, messages: list[dict],
+                 max_tokens: int = 400) -> str:
     contents = [
         {"role": "model" if m["role"] == "assistant" else "user",
          "parts": [{"text": m["content"]}]}
@@ -131,7 +133,12 @@ def _gemini_once(model: str, api_key: str, system: str, messages: list[dict]) ->
     payload = json.dumps({
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": contents,
-        "generationConfig": {"maxOutputTokens": 1024},
+        # thinkingBudget 0 turns off the model's internal reasoning pass —
+        # the single biggest latency win for these short butler replies.
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
     }).encode("utf-8")
     req = urllib.request.Request(
         GEMINI_URL.format(model=model),
@@ -148,12 +155,12 @@ def _gemini_once(model: str, api_key: str, system: str, messages: list[dict]) ->
     return "".join(p.get("text", "") for p in parts).strip()
 
 
-def call_gemini(cfg: dict, system: str, messages: list[dict]) -> str:
+def call_gemini(cfg: dict, system: str, messages: list[dict], max_tokens: int = 400) -> str:
     models = [cfg["model"]] + [m for m in FALLBACK_MODELS if m != cfg["model"]]
     last_err: urllib.error.HTTPError | None = None
     for i, model in enumerate(models):
         try:
-            return _gemini_once(model, cfg["api_key"], system, messages)
+            return _gemini_once(model, cfg["api_key"], system, messages, max_tokens)
         except urllib.error.HTTPError as err:
             if err.code != 429:
                 raise
@@ -162,7 +169,7 @@ def call_gemini(cfg: dict, system: str, messages: list[dict]) -> str:
                 print(f"[gemini] 429 on {model}, retrying in 3s")
                 time.sleep(3)
                 try:
-                    return _gemini_once(model, cfg["api_key"], system, messages)
+                    return _gemini_once(model, cfg["api_key"], system, messages, max_tokens)
                 except urllib.error.HTTPError as err2:
                     if err2.code != 429:
                         raise
@@ -724,6 +731,7 @@ class ViewerHandler(SimpleHTTPRequestHandler):
                 cfg,
                 AGENT_EXEC_SYSTEM.format(notes=format_notes(top)),
                 [{"role": "user", "content": pending}],
+                max_tokens=1024,  # deliverables run longer than spoken replies
             )
         except Exception as err:  # noqa: BLE001
             print(f"[agent] execution failed: {err}")

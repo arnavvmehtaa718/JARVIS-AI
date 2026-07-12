@@ -121,7 +121,8 @@
     font-size: 13px; line-height: 1.6; color: var(--ink);
     display: none; text-wrap: pretty;
   }
-  #answer.show { display: block; }
+  #answer.show { display: block; opacity: 1; transition: opacity 0.4s ease; }
+  #answer.fade { opacity: 0; }
   #answer.error { color: #ff9a9a; }
   #answer .sources { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
   #answer .sources button {
@@ -504,7 +505,29 @@ function revealSources(nodeIds) {
 
 window.__revealSources = revealSources; // debugging handle, like __selectNode
 
+/* ---------- answer lifecycle: visible while speaking, linger 10s, fade out ---------- */
+let lingerTimer = null;
+let fadeTimer = null;
+
+function cancelAnswerFade() {
+  clearTimeout(lingerTimer);
+  clearTimeout(fadeTimer);
+  lingerTimer = fadeTimer = null;
+  answerBox.classList.remove('fade');
+}
+
+function scheduleAnswerFade() {
+  cancelAnswerFade();
+  lingerTimer = setTimeout(() => {
+    answerBox.classList.add('fade');                       // 400ms opacity transition
+    fadeTimer = setTimeout(() => {
+      answerBox.classList.remove('show', 'fade');
+    }, 450);
+  }, 10000);                                               // linger 10s after speech ends
+}
+
 function showAnswer(text, nodeIds = [], isError = false) {
+  cancelAnswerFade();
   answerBox.classList.toggle('error', isError);
   answerBox.textContent = text;
   if (nodeIds.length) {
@@ -752,21 +775,46 @@ const GREETING = `Good ${TOD}, sir. JARVIS online — ${GRAPH.nodes.length} note
 let pendingGreeting = GREETING; // spoken after the first interaction unlocks audio
 showAnswer(GREETING);
 
+// On mobile, the mic hears the phone's own TTS — recognition restarts mid-speech,
+// hears "Jarvis" in the echo, barges in on itself, and the pipeline thrashes in a
+// start/stop loop. The fix: fully suspend recognition while speaking on mobile.
+const IS_MOBILE = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+let speaking = false;
+
 function speak(text) {
-  if (!synth) { setVoiceStatus(null); return; }
+  if (!synth) { setVoiceStatus(null); scheduleAnswerFade(); return; }
   synth.cancel();
   const u = new SpeechSynthesisUtterance(text);
   if (britishVoice) u.voice = britishVoice;
   u.lang = britishVoice ? britishVoice.lang : 'en-GB';
   u.rate = 1.02;
-  u.onstart = () => setVoiceStatus('speaking', 'speaking…');
-  u.onend = () => setVoiceStatus(null);
-  u.onerror = () => setVoiceStatus(null);
+  u.onstart = () => {
+    speaking = true;
+    if (IS_MOBILE) suspendRecognition();
+    setVoiceStatus('speaking', 'speaking…');
+    // the response is on screen for the entire duration of the speech
+    cancelAnswerFade();
+    answerBox.classList.add('show');
+  };
+  const done = () => {
+    if (!speaking) return; // onerror after onend — run once
+    speaking = false;
+    setVoiceStatus(null);
+    scheduleAnswerFade();               // linger 10s, then fade away
+    if (IS_MOBILE) resumeRecognition();
+  };
+  u.onend = done;
+  u.onerror = done;
   synth.speak(u);
 }
 
 function stopSpeaking() {
   if (synth) synth.cancel();
+  if (speaking) {
+    speaking = false;
+    scheduleAnswerFade();
+    if (IS_MOBILE) resumeRecognition();
+  }
 }
 
 /* ---------- voice in: wake word + true barge-in ----------
@@ -783,8 +831,27 @@ const WAKE_RE = /\bjarvis\b/i;
 let recognition = null;
 let recMode = 'passive';
 let recRunning = false;
-let micAllowed = true;   // flips false on not-allowed so we stop retrying
-let manualStart = false; // only surface mic errors the user caused directly
+let micAllowed = true;    // flips false on not-allowed so we stop retrying
+let manualStart = false;  // only surface mic errors the user caused directly
+let recSuspended = false; // mobile: paused on purpose while JARVIS speaks
+let lastRecStart = 0;     // for restart backoff
+let restartDelay = 300;   // grows when sessions die instantly (mobile thrash guard)
+
+function safeStartRecognition() {
+  if (recRunning || recSuspended || !micAllowed || document.hidden) return;
+  try { recognition.start(); } catch { /* still stopping — watchdog retries */ }
+}
+
+function suspendRecognition() {
+  recSuspended = true;
+  try { recognition.abort(); } catch { /* not running */ }
+}
+
+function resumeRecognition() {
+  recSuspended = false;
+  // small delay lets the TTS audio tail fade before the mic reopens
+  setTimeout(safeStartRecognition, 250);
+}
 
 function setActiveUI(on) {
   micButton.classList.toggle('listening', on);
@@ -804,11 +871,13 @@ if (SpeechRec) {
   micButton.hidden = false;
   recognition = new SpeechRec();
   recognition.lang = 'en-GB';
-  recognition.continuous = true;      // stays on: this is what makes the wake word work
+  // Android Chrome mishandles continuous mode (instant onend loops); short
+  // sessions + our restart logic behave far better there.
+  recognition.continuous = !IS_MOBILE;
   recognition.interimResults = true;
   recognition.maxAlternatives = 1;
 
-  recognition.onstart = () => { recRunning = true; };
+  recognition.onstart = () => { recRunning = true; lastRecStart = Date.now(); };
 
   recognition.onresult = e => {
     const latest = e.results[e.results.length - 1];
@@ -854,46 +923,44 @@ if (SpeechRec) {
     recRunning = false;
     // an active session that ended without a final result must not leave the UI stuck
     if (recMode === 'active') { recMode = 'passive'; setActiveUI(false); }
-    // quick restart for the common timeout case; the watchdog below catches the rest
-    if (micAllowed && !document.hidden) {
-      setTimeout(() => { try { recognition.start(); } catch { /* watchdog will retry */ } }, 300);
-    }
+    if (recSuspended || !micAllowed || document.hidden) return; // deliberate pause — stay quiet
+    // Backoff: sessions that die instantly (mobile thrash) restart ever more
+    // slowly, up to 4s; healthy long sessions reset to a quick 300ms restart.
+    const lived = Date.now() - lastRecStart;
+    restartDelay = lived < 1000 ? Math.min(restartDelay * 2, 4000) : 300;
+    setTimeout(safeStartRecognition, restartDelay);
   };
 
-  // Watchdog: Chrome kills continuous recognition after silence, tab switches,
-  // audio output, or network blips — and a single failed .start() used to end
-  // the wake word forever. Re-check every 3s and revive whenever it's down.
+  // Watchdog: Chrome kills recognition after silence, tab switches, audio
+  // output, or network blips — and a single failed .start() used to end the
+  // wake word forever. Re-check every 5s and revive whenever it's down.
   let watchdogStarted = false;
   function startWatchdog() {
     if (watchdogStarted) return;
     watchdogStarted = true;
-    setInterval(() => {
-      if (!recRunning && micAllowed && !document.hidden) {
-        try { recognition.start(); } catch { /* still stopping — next tick */ }
-      }
-    }, 3000);
+    setInterval(safeStartRecognition, 5000);
     // returning to the tab restarts listening immediately, not on the next tick
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && !recRunning && micAllowed) {
-        try { recognition.start(); } catch { /* next tick */ }
-      }
+      if (!document.hidden) safeStartRecognition();
     });
   }
 
   micButton.addEventListener('click', () => {
     unlockAudio(); // the click also unlocks speech output
     manualStart = true;
+    stopSpeaking(); // tapping the mic is the mobile barge-in
     if (recMode === 'active') { recMode = 'passive'; setActiveUI(false); return; }
     micAllowed = true;
+    recSuspended = false;
     enterActive();
     startWatchdog();
-    if (!recRunning) { try { recognition.start(); } catch { /* already started */ } }
+    safeStartRecognition();
   });
 
   // begin passive wake-word listening on the first interaction (mic permission needs a gesture)
   window.addEventListener('pointerdown', () => {
     startWatchdog();
-    if (!recRunning && micAllowed) { try { recognition.start(); } catch { /* fine */ } }
+    safeStartRecognition();
   }, { once: true });
 }
 </script>
