@@ -132,11 +132,20 @@ def load_env_setting(name: str) -> str:
 
 
 def load_eleven_key() -> str:
-    return load_env_setting("ELEVENLABS_API_KEY")
+    """ElevenLabs API keys start with sk_. If ELEVENLABS_API_KEY holds
+    something else (a common slip is pasting the voice ID), also check the
+    generic API_KEY name before giving up."""
+    key = load_env_setting("ELEVENLABS_API_KEY")
+    if key.startswith("sk_"):
+        return key
+    alt = load_env_setting("API_KEY")
+    return alt if alt.startswith("sk_") else key
 
 
 def load_eleven_voice() -> str:
-    return load_env_setting("ELEVENLABS_VOICE_ID")
+    voice = load_env_setting("ELEVENLABS_VOICE_ID")
+    # an sk_ key pasted in the voice slot is never a valid voice ID
+    return "" if voice.startswith("sk_") else voice
 
 
 def eleven_tts(text: str, api_key: str, voice_id: str) -> bytes:
