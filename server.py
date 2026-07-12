@@ -117,6 +117,34 @@ def load_config() -> dict:
     return cfg
 
 
+# ---------------------------------------------------------------- elevenlabs tts
+# The key stays strictly server-side: the browser POSTs text to /tts and gets
+# audio bytes back — it never sees the key. No key → 503 → browser voice fallback.
+
+ELEVEN_VOICE_ID = "lUTamkMw7gOzZbFIwmq4"
+ELEVEN_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=mp3_44100_64"
+
+
+def load_eleven_key() -> str:
+    return os.environ.get("ELEVENLABS_API_KEY", "").strip() or read_env_file_key("ELEVENLABS_API_KEY")
+
+
+def eleven_tts(text: str, api_key: str) -> bytes:
+    payload = json.dumps({
+        "text": text,
+        "model_id": "eleven_turbo_v2_5",  # lowest-latency model
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        ELEVEN_TTS_URL.format(voice=ELEVEN_VOICE_ID),
+        data=payload,
+        method="POST",
+        headers={"content-type": "application/json", "xi-api-key": api_key},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read()
+
+
 # On 429 (rate limit), retry once after a pause, then fall back to the full
 # flash model — it has its own separate free-tier quota. (Lite is primary:
 # it answers in under a second where flash takes ~9s.)
@@ -472,6 +500,7 @@ class ViewerHandler(SimpleHTTPRequestHandler):
             "/settings": self._handle_settings,
             "/timemachine": self._handle_timemachine,
             "/agent": self._handle_agent,
+            "/tts": self._handle_tts,
         }
         if self.path in routes:
             routes[self.path]()
@@ -579,6 +608,37 @@ class ViewerHandler(SimpleHTTPRequestHandler):
         log_activity("remember", text, result["node"]["id"])
         print(f"[remember] filed '{result['node']['label']}' as node {result['node']['id']}")
         self._send_json(200, result)
+
+    # ------------------------------------------------------------ tts (elevenlabs proxy)
+
+    def _handle_tts(self):
+        try:
+            text = str(self._read_body().get("text", "")).strip()[:1200]
+        except (ValueError, json.JSONDecodeError):
+            self._send_json(400, {"error": "Invalid request body."})
+            return
+        if not text:
+            self._send_json(400, {"error": "Text required."})
+            return
+        api_key = load_eleven_key()
+        if not api_key:
+            self._send_json(503, {"error": "no_tts_key"})  # client falls back to browser voice
+            return
+        try:
+            audio = eleven_tts(text, api_key)
+        except urllib.error.HTTPError as err:
+            print(f"[tts] ElevenLabs error {err.code}: {err.read().decode('utf-8', 'replace')[:200]}")
+            self._send_json(502, {"error": "tts_failed"})
+            return
+        except (urllib.error.URLError, TimeoutError) as err:
+            print(f"[tts] ElevenLabs unreachable: {err}")
+            self._send_json(502, {"error": "tts_failed"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(len(audio)))
+        self.end_headers()
+        self.wfile.write(audio)
 
     # ------------------------------------------------------------ settings
 

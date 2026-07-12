@@ -781,34 +781,80 @@ showAnswer(GREETING);
 const IS_MOBILE = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
 let speaking = false;
 
-function speak(text) {
+/* Speech lifecycle shared by both voices (ElevenLabs and browser fallback):
+   bubble visible for the whole utterance, mic suspended on mobile, then
+   linger 10s and fade. */
+function speechStarted() {
+  speaking = true;
+  if (IS_MOBILE) suspendRecognition();
+  setVoiceStatus('speaking', 'speaking…');
+  // the response is on screen for the entire duration of the speech
+  cancelAnswerFade();
+  answerBox.classList.add('show');
+}
+
+function speechDone() {
+  if (!speaking) return; // onerror after onend — run once
+  speaking = false;
+  setVoiceStatus(null);
+  scheduleAnswerFade();               // linger 10s, then fade away
+  if (IS_MOBILE) resumeRecognition();
+}
+
+/* ElevenLabs voice via the server's /tts proxy — the API key never reaches
+   the browser. Any failure (no key, quota, network) falls back seamlessly
+   to the browser's British voice. */
+let currentAudio = null;
+let currentAudioUrl = null;
+let speakSeq = 0; // ignore stale fetches after a barge-in
+
+function cleanupAudio() {
+  if (currentAudio) { currentAudio.onended = currentAudio.onerror = null; currentAudio.pause(); }
+  if (currentAudioUrl) { URL.revokeObjectURL(currentAudioUrl); currentAudioUrl = null; }
+  currentAudio = null;
+}
+
+async function speak(text) {
+  stopSpeaking();
+  const seq = ++speakSeq;
+  try {
+    const res = await fetch('/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    if (!res.ok) throw new Error('tts unavailable');
+    const blob = await res.blob();
+    if (seq !== speakSeq) return; // user barged in while we were fetching
+    currentAudioUrl = URL.createObjectURL(blob);
+    currentAudio = new Audio(currentAudioUrl);
+    currentAudio.onended = () => { cleanupAudio(); speechDone(); };
+    currentAudio.onerror = () => { cleanupAudio(); speechDone(); };
+    speechStarted();
+    await currentAudio.play();
+  } catch {
+    if (seq !== speakSeq) return;
+    cleanupAudio();
+    speakWithBrowserVoice(text); // graceful fallback
+  }
+}
+
+function speakWithBrowserVoice(text) {
   if (!synth) { setVoiceStatus(null); scheduleAnswerFade(); return; }
   synth.cancel();
   const u = new SpeechSynthesisUtterance(text);
   if (britishVoice) u.voice = britishVoice;
   u.lang = britishVoice ? britishVoice.lang : 'en-GB';
   u.rate = 1.02;
-  u.onstart = () => {
-    speaking = true;
-    if (IS_MOBILE) suspendRecognition();
-    setVoiceStatus('speaking', 'speaking…');
-    // the response is on screen for the entire duration of the speech
-    cancelAnswerFade();
-    answerBox.classList.add('show');
-  };
-  const done = () => {
-    if (!speaking) return; // onerror after onend — run once
-    speaking = false;
-    setVoiceStatus(null);
-    scheduleAnswerFade();               // linger 10s, then fade away
-    if (IS_MOBILE) resumeRecognition();
-  };
-  u.onend = done;
-  u.onerror = done;
+  u.onstart = speechStarted;
+  u.onend = speechDone;
+  u.onerror = speechDone;
   synth.speak(u);
 }
 
 function stopSpeaking() {
+  speakSeq++;            // invalidate any in-flight /tts fetch
+  cleanupAudio();
   if (synth) synth.cancel();
   if (speaking) {
     speaking = false;
@@ -885,7 +931,7 @@ if (SpeechRec) {
 
     if (recMode === 'passive') {
       // true barge-in: the instant "jarvis" is heard — even mid-utterance — cut the speech
-      if (WAKE_RE.test(transcript) && synth?.speaking) stopSpeaking();
+      if (WAKE_RE.test(transcript) && speaking) stopSpeaking();
       if (!latest.isFinal || !WAKE_RE.test(transcript)) return;
       const command = transcript.replace(/^[\s\S]*?\bjarvis\b[,.!?\s]*/i, '').trim();
       if (command.length > 2) {          // "Jarvis, brief me" — one breath, straight through
