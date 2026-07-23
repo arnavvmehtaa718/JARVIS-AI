@@ -167,7 +167,7 @@ def eleven_tts(text: str, api_key: str, voice_id: str) -> bytes:
 # On 429 (rate limit), retry once after a pause, then fall back to the full
 # flash model — it has its own separate free-tier quota. (Lite is primary:
 # it answers in under a second where flash takes ~9s.)
-FALLBACK_MODELS = ["gemini-2.5-flash"]
+FALLBACK_MODELS = ["gemini-2.5-flash-lite"]
 
 
 def _gemini_once(model: str, api_key: str, system: str, messages: list[dict],
