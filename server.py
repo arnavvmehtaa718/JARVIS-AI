@@ -32,6 +32,7 @@ SETTINGS_PATH = ROOT / "settings.json"      # city etc. — root only, never ser
 ACTIVITY_LOG = ROOT / "jarvis-log.jsonl"    # time machine's memory — never served
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
 TOP_K = 6
 MAX_HISTORY_TURNS = 6          # user+assistant pairs kept per session
 SESSION_TTL_SECONDS = 60 * 60  # drop sessions idle for an hour
@@ -104,7 +105,7 @@ def read_env_file_key(name: str) -> str:
     return ""
 
 
-KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "api_key")
+KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
 
 
 def load_config() -> dict:
@@ -114,6 +115,9 @@ def load_config() -> dict:
         if env_key:
             cfg["api_key"] = env_key
             break
+    env_model = os.environ.get("GEMINI_MODEL", "").strip() or read_env_file_key("GEMINI_MODEL")
+    if env_model:
+        cfg["model"] = env_model
     return cfg
 
 
@@ -164,10 +168,45 @@ def eleven_tts(text: str, api_key: str, voice_id: str) -> bytes:
         return resp.read()
 
 
-# On 429 (rate limit), retry once after a pause, then fall back to the full
-# flash model — it has its own separate free-tier quota. (Lite is primary:
-# it answers in under a second where flash takes ~9s.)
-FALLBACK_MODELS = ["gemini-2.5-flash-lite"]
+# Stable IDs first; aliases such as *-latest can disappear without notice.
+# The live model catalogue is queried and cached, so retired models are skipped
+# automatically rather than turning one Google 404 into a broken JARVIS.
+PREFERRED_MODELS = (
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-3.1-flash-lite",
+)
+MODEL_CACHE = {"expires": 0.0, "models": set()}
+
+
+def available_gemini_models(api_key: str, force: bool = False) -> set[str]:
+    now = time.time()
+    if not force and MODEL_CACHE["models"] and now < MODEL_CACHE["expires"]:
+        return MODEL_CACHE["models"]
+    req = urllib.request.Request(GEMINI_MODELS_URL, headers={"x-goog-api-key": api_key})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    models = {
+        item["name"].removeprefix("models/")
+        for item in data.get("models", [])
+        if "generateContent" in item.get("supportedGenerationMethods", [])
+    }
+    MODEL_CACHE.update(models=models, expires=now + 3600)
+    return models
+
+
+def gemini_candidates(cfg: dict) -> list[str]:
+    requested = str(cfg.get("model", "")).strip()
+    preferred = [requested, *PREFERRED_MODELS] if requested else list(PREFERRED_MODELS)
+    try:
+        available = available_gemini_models(cfg["api_key"])
+        candidates = [model for model in preferred if model in available]
+        if not candidates:
+            candidates = sorted(model for model in available if "flash" in model and "preview" not in model)
+        return list(dict.fromkeys(candidates))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError):
+        # Catalogue lookup must never prevent an otherwise valid generation call.
+        return list(dict.fromkeys(preferred))
 
 
 def _gemini_once(model: str, api_key: str, system: str, messages: list[dict],
@@ -203,26 +242,30 @@ def _gemini_once(model: str, api_key: str, system: str, messages: list[dict],
 
 
 def call_gemini(cfg: dict, system: str, messages: list[dict], max_tokens: int = 400) -> str:
-    models = [cfg["model"]] + [m for m in FALLBACK_MODELS if m != cfg["model"]]
+    models = gemini_candidates(cfg)
+    if not models:
+        raise RuntimeError("Gemini returned no generateContent-capable models.")
     last_err: urllib.error.HTTPError | None = None
-    for i, model in enumerate(models):
+    for model in models:
         try:
             return _gemini_once(model, cfg["api_key"], system, messages, max_tokens)
         except urllib.error.HTTPError as err:
-            if err.code != 429:
-                raise
             last_err = err
-            if i == 0:  # primary model: pause briefly and retry once before falling back
-                print(f"[gemini] 429 on {model}, retrying in 3s")
-                time.sleep(3)
-                try:
-                    return _gemini_once(model, cfg["api_key"], system, messages, max_tokens)
-                except urllib.error.HTTPError as err2:
-                    if err2.code != 429:
-                        raise
-                    last_err = err2
-            print(f"[gemini] 429 on {model}, falling back")
-    raise last_err  # every model rate-limited
+            if err.code == 404:
+                # The catalogue changed between lookup and generation. Expire it,
+                # skip the retired model, and continue without showing an error.
+                MODEL_CACHE["expires"] = 0.0
+                print(f"[gemini] {model} retired or unavailable; trying next model")
+                continue
+            if err.code == 429:
+                # Do not add a three-second retry penalty: another model may have
+                # separate quota and can answer immediately.
+                print(f"[gemini] quota exhausted on {model}; trying next model")
+                continue
+            raise
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("No usable Gemini model was found.")
 
 
 SYSTEM_TEMPLATE = """You are JARVIS, butler of Arnav's knowledge galaxy — his "second brain". You are a dry, impeccably polite British butler with a razor wit. Address him as "sir" occasionally (not every sentence); "sir Arnav" or simply "Arnav" where it suits the moment. One genuinely funny line beats three bland ones. Never grovel, never gush.
@@ -544,7 +587,7 @@ class ViewerHandler(SimpleHTTPRequestHandler):
         key = cfg.get("api_key", "")
         if not key or "PASTE_YOUR" in key:
             self._send_json(503, {
-                "error": "No API key configured. Add it to config.json or set GEMINI_API_KEY."
+                "error": "No Gemini API key configured. Set GEMINI_API_KEY in the environment."
             })
             return
 
@@ -564,7 +607,11 @@ class ViewerHandler(SimpleHTTPRequestHandler):
             if err.code == 429:
                 self._send_json(429, {"error": "My apologies, sir — the free Gemini quota is spent for the moment. Give it a minute (or a day, if the daily limit is hit) and try again."})
             else:
-                self._send_json(502, {"error": f"Gemini API error ({err.code}). Check the model name and key in config.json."})
+                self._send_json(502, {"error": f"Gemini API error ({err.code}). The model catalogue was refreshed automatically; verify GEMINI_API_KEY if this continues."})
+            return
+        except RuntimeError as err:
+            print(f"[chat] Gemini model selection error: {err}")
+            self._send_json(503, {"error": "No compatible Gemini model is currently available. JARVIS will retry against the live catalogue on your next question."})
             return
         except (urllib.error.URLError, TimeoutError) as err:
             print(f"[chat] network error: {err}")
