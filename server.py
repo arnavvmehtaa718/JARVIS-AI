@@ -127,7 +127,7 @@ def load_config() -> dict:
 # Both the key and the voice come from env vars (ELEVENLABS_API_KEY,
 # ELEVENLABS_VOICE_ID) so the voice can be swapped without touching code.
 
-ELEVEN_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=mp3_44100_64"
+ELEVEN_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=mp3_22050_32"
 
 
 def load_env_setting(name: str) -> str:
@@ -136,27 +136,25 @@ def load_env_setting(name: str) -> str:
 
 
 def load_eleven_key() -> str:
-    """ElevenLabs API keys start with sk_. If ELEVENLABS_API_KEY holds
-    something else (a common slip is pasting the voice ID), also check the
-    generic API_KEY name before giving up."""
     key = load_env_setting("ELEVENLABS_API_KEY")
-    if key.startswith("sk_"):
+    if key:
         return key
     alt = load_env_setting("API_KEY")
-    return alt if alt.startswith("sk_") else key
+    return alt if alt.startswith("sk_") else ""
 
 
 def load_eleven_voice() -> str:
     voice = load_env_setting("ELEVENLABS_VOICE_ID")
-    # an sk_ key pasted in the voice slot is never a valid voice ID
-    return "" if voice.startswith("sk_") else voice
+    if voice and not voice.startswith("sk_"):
+        return voice
+    return "lUTamkMw7gOzZbFIwmq4"  # fallback: original male voice
 
 
 def eleven_tts(text: str, api_key: str, voice_id: str) -> bytes:
     payload = json.dumps({
         "text": text,
         "model_id": "eleven_turbo_v2_5",  # lowest-latency model
-        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+        "voice_settings": {"stability": 0.3, "similarity_boost": 0.75},
     }).encode("utf-8")
     req = urllib.request.Request(
         ELEVEN_TTS_URL.format(voice=voice_id),
