@@ -733,16 +733,20 @@ function setVoiceStatus(mode, label) {
   voiceStatus.classList.add('show');
 }
 
-/* ---------- voice out: speechSynthesis, prefer British English ---------- */
+/* ---------- voice out: speechSynthesis, prefer British male ---------- */
 const synth = window.speechSynthesis;
 let britishVoice = null;
 let audioUnlocked = false;
+
+const MALE_RE = /david|mark|george|daniel|james|alex|brian|male|guy|man/i;
 
 function pickVoice() {
   if (!synth) return;
   const voices = synth.getVoices();
   if (!voices.length) return;
   britishVoice =
+    voices.find(v => v.lang === 'en-GB' && MALE_RE.test(v.name)) ||
+    voices.find(v => v.lang.startsWith('en') && MALE_RE.test(v.name)) ||
     voices.find(v => v.lang === 'en-GB' && /google/i.test(v.name)) ||
     voices.find(v => v.lang === 'en-GB') ||
     voices.find(v => v.lang.startsWith('en')) ||
