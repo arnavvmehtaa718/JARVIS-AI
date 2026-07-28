@@ -147,7 +147,7 @@ def load_eleven_voice() -> str:
     voice = load_env_setting("ELEVENLABS_VOICE_ID")
     if voice and not voice.startswith("sk_"):
         return voice
-    return "lUTamkMw7gOzZbFIwmq4"  # fallback: original male voice
+    return "onwK4e9ZLuTAKqWW03F9"  # fallback: Daniel (British, authoritative)
 
 
 def eleven_tts(text: str, api_key: str, voice_id: str) -> bytes:

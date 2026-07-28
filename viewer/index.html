@@ -830,7 +830,7 @@ async function speak(text) {
     currentAudio = new Audio(currentAudioUrl);
     currentAudio.onended = () => { cleanupAudio(); speechDone(); };
     currentAudio.onerror = () => { cleanupAudio(); speechDone(); };
-    currentAudio.playbackRate = 1.3;
+    currentAudio.playbackRate = 1.0;
     speechStarted();
     await currentAudio.play();
   } catch {
@@ -846,7 +846,7 @@ function speakWithBrowserVoice(text) {
   const u = new SpeechSynthesisUtterance(text);
   if (britishVoice) u.voice = britishVoice;
   u.lang = britishVoice ? britishVoice.lang : 'en-GB';
-  u.rate = 1.3;
+  u.rate = 1.0;
   u.onstart = speechStarted;
   u.onend = speechDone;
   u.onerror = speechDone;
