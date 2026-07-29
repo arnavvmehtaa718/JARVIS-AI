@@ -3,7 +3,7 @@ services:
     name: jarvis-ai
     runtime: python
     plan: free
-    buildCommand: python3 build.py
+    buildCommand: pip install -r requirements.txt && python3 build.py
     startCommand: python3 server.py
     envVars:
       - key: GEMINI_API_KEY
