@@ -11,6 +11,7 @@ ANTHROPIC_API_KEY environment variable / root .env file. config.json and the
 .env files are NOT inside viewer/, so they can never be served to the browser.
 """
 
+import base64
 import json
 import os
 import re
@@ -121,49 +122,44 @@ def load_config() -> dict:
     return cfg
 
 
-# ---------------------------------------------------------------- elevenlabs tts
-# The key stays strictly server-side: the browser POSTs text to /tts and gets
-# audio bytes back — it never sees the key. No key → 503 → browser voice fallback.
-# Both the key and the voice come from env vars (ELEVENLABS_API_KEY,
-# ELEVENLABS_VOICE_ID) so the voice can be swapped without touching code.
+# ---------------------------------------------------------------- inworld ai tts
+# On-Demand free tier: 70 minutes of TTS / month, no billing needed.
+# Voice cloned from ElevenLabs "James" lives at your INWORLD_VOICE_ID.
+# API key via INWORLD_API_KEY env var or .env file.
+# Any failure → 503 → browser SpeechSynthesis fallback.
 
-ELEVEN_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=mp3_22050_32"
-
-
-def load_env_setting(name: str) -> str:
-    """Env var first, then local .env files — read fresh each call."""
-    return os.environ.get(name, "").strip() or read_env_file_key(name)
+INWORLD_TTS_URL = "https://api.inworld.ai/tts/v1/voice"
 
 
-def load_eleven_key() -> str:
-    key = load_env_setting("ELEVENLABS_API_KEY")
-    if key:
-        return key
-    alt = load_env_setting("API_KEY")
-    return alt if alt.startswith("sk_") else ""
+def load_inworld_key() -> str:
+    return os.environ.get("INWORLD_API_KEY", "").strip() or read_env_file_key("INWORLD_API_KEY")
 
 
-def load_eleven_voice() -> str:
-    voice = load_env_setting("ELEVENLABS_VOICE_ID")
-    if voice and not voice.startswith("sk_"):
-        return voice
-    return "JBFqnCBsd6RMkjVDRZzb"  # fallback: George (British, storytelling)
+def load_inworld_voice() -> str:
+    return os.environ.get("INWORLD_VOICE_ID", "").strip() or read_env_file_key("INWORLD_VOICE_ID")
 
 
-def eleven_tts(text: str, api_key: str, voice_id: str) -> bytes:
+def inworld_tts(text: str, api_key: str, voice_id: str) -> bytes:
     payload = json.dumps({
         "text": text,
-        "model_id": "eleven_turbo_v2_5",  # lowest-latency model
-        "voice_settings": {"stability": 0.3, "similarity_boost": 0.75},
+        "voice_id": voice_id,
+        "model_id": "inworld-tts-2",
+        "audio_config": {"audio_encoding": "MP3", "speaking_rate": 1},
+        "delivery_mode": "BALANCED",
+        "language": "en-US",
     }).encode("utf-8")
     req = urllib.request.Request(
-        ELEVEN_TTS_URL.format(voice=voice_id),
+        INWORLD_TTS_URL,
         data=payload,
         method="POST",
-        headers={"content-type": "application/json", "xi-api-key": api_key},
+        headers={
+            "content-type": "application/json",
+            "Authorization": api_key,
+        },
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read()
+        data = json.loads(resp.read().decode("utf-8"))
+    return base64.b64decode(data["audioContent"])
 
 
 # Stable IDs first; aliases such as *-latest can disappear without notice.
@@ -673,7 +669,7 @@ class ViewerHandler(SimpleHTTPRequestHandler):
         print(f"[remember] filed '{result['node']['label']}' as node {result['node']['id']}")
         self._send_json(200, result)
 
-    # ------------------------------------------------------------ tts (elevenlabs proxy)
+    # ------------------------------------------------------------ tts (inworld ai)
 
     def _handle_tts(self):
         try:
@@ -684,20 +680,20 @@ class ViewerHandler(SimpleHTTPRequestHandler):
         if not text:
             self._send_json(400, {"error": "Text required."})
             return
-        api_key = load_eleven_key()
-        voice_id = load_eleven_voice()
+        api_key = load_inworld_key()
+        voice_id = load_inworld_voice()
         if not api_key or not voice_id:
-            # missing key or voice → client falls back to browser voice
-            self._send_json(503, {"error": "no_tts_key"})
+            self._send_json(503, {"error": "no_tts_config"})
             return
         try:
-            audio = eleven_tts(text, api_key, voice_id)
+            audio = inworld_tts(text, api_key, voice_id)
         except urllib.error.HTTPError as err:
-            print(f"[tts] ElevenLabs error {err.code}: {err.read().decode('utf-8', 'replace')[:200]}")
+            body = err.read().decode("utf-8", "replace")[:200]
+            print(f"[tts] Inworld error {err.code}: {body}")
             self._send_json(502, {"error": "tts_failed"})
             return
         except (urllib.error.URLError, TimeoutError) as err:
-            print(f"[tts] ElevenLabs unreachable: {err}")
+            print(f"[tts] Inworld unreachable: {err}")
             self._send_json(502, {"error": "tts_failed"})
             return
         self.send_response(200)

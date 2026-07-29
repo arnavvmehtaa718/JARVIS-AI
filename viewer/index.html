@@ -785,7 +785,7 @@ showAnswer(GREETING);
 const IS_MOBILE = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
 let speaking = false;
 
-/* Speech lifecycle shared by both voices (ElevenLabs and browser fallback):
+/* Speech lifecycle shared by both voices (Inworld AI and browser fallback):
    bubble visible for the whole utterance, mic suspended on mobile, then
    linger 10s and fade. */
 function speechStarted() {
@@ -805,9 +805,8 @@ function speechDone() {
   if (IS_MOBILE) resumeRecognition();
 }
 
-/* ElevenLabs voice via the server's /tts proxy — the API key never reaches
-   the browser. Any failure (no key, quota, network) falls back seamlessly
-   to the browser's British voice. */
+/* Inworld AI TTS via the server's /tts proxy. Any failure falls back
+   seamlessly to browser SpeechSynthesis. */
 let currentAudio = null;
 let currentAudioUrl = null;
 let speakSeq = 0; // ignore stale fetches after a barge-in
