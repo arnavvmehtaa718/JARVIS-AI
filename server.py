@@ -162,6 +162,30 @@ def inworld_tts(text: str, api_key: str, voice_id: str) -> bytes:
     return base64.b64decode(data["audioContent"])
 
 
+# ---------------------------------------------------------------- edge tts fallback
+# Unlimited free cloud TTS via Microsoft Edge's neural voices. No key, no billing.
+# Used when Inworld AI is unavailable (quota exhausted, network error, etc.).
+# pip install edge-tts
+
+try:
+    import asyncio as _asyncio
+    import edge_tts as _edge_tts
+
+    async def _edge_tts_async(text: str) -> bytes:
+        chunks: list[bytes] = []
+        async for chunk in _edge_tts.Communicate(text, "en-GB-RyanNeural").stream():
+            if chunk["type"] == "audio":
+                chunks.append(chunk["data"])
+        return b"".join(chunks)
+
+    def edge_tts(text: str) -> bytes:
+        return _asyncio.run(_edge_tts_async(text))
+
+except ImportError:
+    def edge_tts(text: str) -> bytes:
+        return b""
+
+
 # Stable IDs first; aliases such as *-latest can disappear without notice.
 # The live model catalogue is queried and cached, so retired models are skipped
 # automatically rather than turning one Google 404 into a broken JARVIS.
@@ -669,7 +693,7 @@ class ViewerHandler(SimpleHTTPRequestHandler):
         print(f"[remember] filed '{result['node']['label']}' as node {result['node']['id']}")
         self._send_json(200, result)
 
-    # ------------------------------------------------------------ tts (inworld ai)
+    # ------------------------------------------------------------ tts (inworld + edge fallback)
 
     def _handle_tts(self):
         try:
@@ -680,22 +704,35 @@ class ViewerHandler(SimpleHTTPRequestHandler):
         if not text:
             self._send_json(400, {"error": "Text required."})
             return
+
+        # Try Inworld AI first
         api_key = load_inworld_key()
         voice_id = load_inworld_voice()
-        if not api_key or not voice_id:
-            self._send_json(503, {"error": "no_tts_config"})
-            return
+        if api_key and voice_id:
+            try:
+                audio = inworld_tts(text, api_key, voice_id)
+                self._send_audio(audio)
+                return
+            except urllib.error.HTTPError as err:
+                body = err.read().decode("utf-8", "replace")[:200]
+                print(f"[tts] Inworld error {err.code}: {body} — falling back")
+            except (urllib.error.URLError, TimeoutError) as err:
+                print(f"[tts] Inworld unreachable: {err} — falling back")
+
+        # Fallback: Edge TTS (unlimited)
         try:
-            audio = inworld_tts(text, api_key, voice_id)
-        except urllib.error.HTTPError as err:
-            body = err.read().decode("utf-8", "replace")[:200]
-            print(f"[tts] Inworld error {err.code}: {body}")
-            self._send_json(502, {"error": "tts_failed"})
+            audio = edge_tts(text)
+        except Exception as err:
+            print(f"[tts] Edge TTS error: {err}")
+            audio = b""
+        if audio:
+            self._send_audio(audio)
             return
-        except (urllib.error.URLError, TimeoutError) as err:
-            print(f"[tts] Inworld unreachable: {err}")
-            self._send_json(502, {"error": "tts_failed"})
-            return
+
+        # Nothing works → browser speech fallback
+        self._send_json(503, {"error": "no_tts"})
+
+    def _send_audio(self, audio: bytes) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "audio/mpeg")
         self.send_header("Content-Length", str(len(audio)))
